@@ -1,0 +1,6 @@
+so it's an lms which has many courses and many instructors
+the student can choose a plan  month - 3 month - 1 year - term*
+the revenue is shared between the instructors and the platform the platform takes a cut
+the payout is on a schedule
+
+

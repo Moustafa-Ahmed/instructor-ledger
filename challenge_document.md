@@ -1,0 +1,276 @@
+# 🧩 The Challenge — "Instructor Revenue Ledger"
+
+## The Story
+
+An online courses platform (an LMS):
+
+- Students pay for a subscription to access the platform.
+- Instructors earn a revenue share of subscription income — the rest is the platform's cut.
+- Students choose one of three plans — monthly, 3-month, or annual — and pay for the whole term up front, on day one.
+- A single subscription gives access to courses from many instructors, so each payment has to be divided among the instructors involved.
+- On a schedule, the platform pays each instructor what they're owed, through an external payment provider (which you'll mock — see below).
+
+This is the part of the system that moves real money.
+
+Getting it wrong means an instructor is paid twice, paid the wrong amount, or paid money that later has to be recovered.
+
+"It runs on my machine" isn't the standard here — it has to be correct, and stay correct when things go wrong.
+
+## What the system has to do
+
+Build the money core: take subscription payments in, and pay instructors their share out — accurately, at scale, even when parts of the system fail or run more than once.
+
+Your system should be able to answer, at any point in time:
+
+- How much each instructor is owed
+- How much has already been paid
+- How much is still outstanding
+
+And to do so for a platform with:
+
+- 500,000 active subscriptions
+- Tens of millions of underlying records
+
+It must also hold up under real-world conditions:
+
+- The payout process may run more than once — overlapping schedules, a manual re-trigger, or two servers at the same time. No instructor should ever be paid twice for the same thing.
+- The external payment provider is unreliable. It can succeed, fail outright, or stop responding after it has already moved the money — leaving you unsure whether a payment went through. Your design has to cope with that uncertainty.
+- Background workers can crash mid-way and have their jobs retried.
+- Refunds happen — including partway through a subscription term. Your design should handle a student leaving mid-term sensibly, given that they paid for the whole term up front.
+- How money is stored and divided is up to you — including how you handle amounts that don't split evenly between instructors.
+
+Tell us what you chose and why.
+
+## We left some rules unspecified — on purpose
+
+We have not spelled out every rule.
+
+There are real questions in here about:
+
+- When money counts as earned
+- How a single payment should be divided between instructors
+- What should happen at the messy edges
+
+Spotting those questions, making a sensible call, and explaining the trade-off is part of what we're evaluating.
+
+If something is ambiguous, decide, write down your reasoning, and move on — don't email us to ask.
+
+## 📦 What to Hand In
+
+You do not need a full application.
+
+Build the core, prove it works, and write down your thinking.
+
+### Required
+
+1. Database schema + migrations  
+   For subscriptions, instructor earnings/balances, and payouts.
+
+2. Revenue allocation logic  
+   The logic that takes subscription payments and turns them into what each instructor is owed (after the platform's cut).
+
+3. Payout process  
+   An Artisan command + queued jobs that pays instructors what they're owed.
+
+4. Mock payment provider  
+   A class that randomly:
+
+   - Succeeds
+   - Fails permanently
+   - Times out after already succeeding
+
+   (The real result can be discovered later through a status check.)
+
+   Show how your code handles this safely.
+
+5. Tests  
+   Unit tests are required. Your submission should include a meaningful suite of unit tests covering core business logic and financial calculations,  
+   And tests for the behaviour that matters most.At minimum we expect coverage proving:
+
+   - Running the payout process twice never double-pays
+   - Retried jobs never double-pay
+   - Unreliable provider responses never cause duplicate payments
+
+6. One simple Filament screen  
+   View:
+
+   - Instructor balance
+   - Payout history
+
+   Read-only is completely fine.
+
+### Senior Bonus (Discussion Only)
+
+Do not build this.
+
+Simply explain in your notes:
+
+How would your design cope with a student changing plans mid-term (for example upgrading partway through an annual subscription with a fair price adjustment)?
+
+We'll explore this during the review session.
+
+## 🤖 AI Usage Policy
+
+AI tools are allowed.
+
+However, this quest is designed to evaluate your engineering judgment, architectural thinking, and understanding of the solution—not just the final output.
+
+Please include a short document:
+
+`/docs/AI_USAGE.md`
+
+Cover the following points:
+
+- How you used AI during the task
+- The main prompts or workflows you relied on
+- Which parts were fully generated vs manually designed or modified by you
+- The engineering decisions you personally made
+- What differentiates your solution from other submissions
+- Any trade-offs, architectural decisions, or improvements you intentionally chose
+
+You do not need to share every prompt.
+
+However, you should provide enough information for us to understand your workflow and level of ownership.
+
+During the review session, we may ask you to:
+
+- Explain any part of your solution
+- Modify parts of the implementation live
+- Justify architectural decisions
+- Discuss alternative approaches and trade-offs
+
+Submissions that demonstrate strong understanding will be valued more highly than submissions that are merely complete.
+
+## 🎥 Video Submission (Required)
+
+Submit a 15–20 minute video.
+
+We are evaluating your thinking process as much as your code.
+
+Your video should include:
+
+1. Introduction (2–3 minutes)
+   - Brief introduction
+   - Previous projects involving payments, subscriptions, ledgers, financial flows, or large-scale systems
+   - Why you chose your approach
+
+2. Architecture Walkthrough (5 minutes)
+   Explain:
+
+   - Domain model
+   - Database design
+   - Revenue allocation strategy
+   - Instructor balance calculation approach
+   - Payout architecture
+   - Key trade-offs
+
+3. Failure Scenario Demonstration (5–7 minutes)
+   Demonstrate at least three scenarios:
+
+   - Running payouts twice
+   - Duplicate job execution
+   - Worker retry after failure
+   - Payment provider timeout
+   - Payment provider success followed by delayed confirmation
+   - Refund after payout allocation
+   - Rounding edge cases
+
+   Show how your system behaves and why money remains correct.
+
+4. Testing Strategy (2–3 minutes)
+   Explain:
+
+   - What you tested
+   - Why you chose those tests
+   - What risks they protect against
+
+5. AI Usage & Engineering Decisions (2–3 minutes)
+   Explain:
+
+   - Where AI helped
+   - What AI suggestions you rejected
+   - The most important engineering decisions you made yourself
+   - What makes your solution different from a typical AI-generated implementation
+
+6. Future Improvements (1–2 minutes)
+   If this were production:
+
+   - What would you improve next?
+   - What scalability concerns remain?
+   - What risks still exist?
+
+## 🧰 Tech Stack
+
+- Laravel 11
+- Livewire v3
+- Alpine.js
+- Filament v3
+- Pest for testing
+- MySQL
+- Docker (optional)
+
+## 📝 What You Should Submit
+
+GitHub/GitLab repository containing:
+
+### Code
+
+- Source code
+- Migrations
+- Factories
+- Seeders
+
+### Documentation
+
+- `README.md`
+
+Include:
+
+- Setup instructions
+- How to run tests
+- Assumptions made
+
+- `/docs/ARCHITECTURE.md`
+
+Include:
+
+- Key architectural decisions
+- Revenue allocation strategy
+- Idempotency approach
+- Provider timeout handling
+- Scaling considerations
+- Known limitations
+
+- `/docs/AI_USAGE.md`
+
+Include the AI explanation described above.
+
+### Evidence
+
+- Screenshot of passing test cases
+- Video submission link
+
+## 📊 Evaluation Criteria
+
+| Area | Weight |
+| --- | --- |
+| Correctness of Money Flows | 25% |
+| Failure Handling & Idempotency | 20% |
+| System Design & Architecture | 20% |
+| Laravel Implementation & Data Integrity | 15% |
+| Testing Strategy & Coverage | 10% |
+| Documentation & Engineering Reasoning | 5% |
+| Video Explanation & AI Transparency | 5% |
+
+## ✅ What We Value
+
+We are intentionally more interested in:
+
+- Correctness with money
+- Failure handling
+- Engineering judgment
+- Trade-off analysis
+- System design thinking
+- Clarity of reasoning
+
+than in the number of features implemented.
