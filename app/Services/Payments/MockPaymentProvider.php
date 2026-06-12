@@ -77,6 +77,18 @@ class MockPaymentProvider
         );
     }
 
+    /**
+     * Look up an existing operation by reference, throwing if missing.
+     * Used for status endpoints where a missing record is a real error.
+     */
+    private function findOperationOrFail(string $operationType, string $idempotencyKey): MockPaymentOperation
+    {
+        return MockPaymentOperation::query()
+            ->where('operation_type', $operationType)
+            ->where('idempotency_key', $idempotencyKey)
+            ->firstOrFail();
+    }
+
     public function useRandomOutcomes(): self
     {
         $this->deterministicOutcomes = null;
@@ -118,7 +130,7 @@ class MockPaymentProvider
 
         $this->validateOperationInput($idempotencyKey, $amountCents, $currency);
 
-        $existingOperation = $this->findOperation($operationType, $idempotencyKey);
+        $existingOperation = $this->findOperationOrNull($operationType, $idempotencyKey);
 
         if ($existingOperation) {
             return $this->returnOrThrowOperationResult($existingOperation);
@@ -129,7 +141,7 @@ class MockPaymentProvider
 
         try {
             $operation = DB::transaction(function () use ($operationType, $idempotencyKey, $amountCents, $currency, $metadata, $status) {
-                $existingOperation = $this->findOperation($operationType, $idempotencyKey);
+                $existingOperation = $this->findOperationOrNull($operationType, $idempotencyKey);
 
                 if ($existingOperation) {
                     return $existingOperation;
@@ -146,7 +158,7 @@ class MockPaymentProvider
                 ]);
             });
         } catch (QueryException $exception) {
-            $operation = $this->findOperation($operationType, $idempotencyKey);
+            $operation = $this->findOperationOrNull($operationType, $idempotencyKey);
 
             if (! $operation) {
                 throw $exception;
@@ -178,16 +190,20 @@ class MockPaymentProvider
         }
 
         return $this->formatOperation(
-            $this->findOperation($operationType, $idempotencyKey),
+            $this->findOperationOrFail($operationType, $idempotencyKey),
         );
     }
 
-    private function findOperation(string $operationType, string $idempotencyKey): MockPaymentOperation
+    /**
+     * Idempotency-path lookup: returns null when the record doesn't exist
+     * yet (e.g. on the first charge/send for a given key). Must NOT throw.
+     */
+    private function findOperationOrNull(string $operationType, string $idempotencyKey): ?MockPaymentOperation
     {
         return MockPaymentOperation::query()
             ->where('operation_type', $operationType)
             ->where('idempotency_key', $idempotencyKey)
-            ->firstOrFail();
+            ->first();
     }
 
     private function validateOperationInput(string $idempotencyKey, int $amountCents, string $currency): void
