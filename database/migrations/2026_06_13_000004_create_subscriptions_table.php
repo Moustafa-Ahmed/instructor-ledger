@@ -20,7 +20,6 @@ return new class extends Migration
             $table->timestamp('ends_at');
             $table->unsignedInteger('charged_amount_cents');
             $table->string('currency', 3)->default('USD');
-            $table->unsignedSmallInteger('platform_cut_bps');
             $table->string('provider_charge_reference')->unique();
             $table->timestamp('charged_at')->nullable();
             $table->timestamps();

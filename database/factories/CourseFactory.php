@@ -18,12 +18,6 @@ class CourseFactory extends Factory
     {
         return [
             'title' => $this->faker->unique()->sentence(3),
-            'is_active' => true,
         ];
-    }
-
-    public function inactive(): static
-    {
-        return $this->state(fn () => ['is_active' => false]);
     }
 }

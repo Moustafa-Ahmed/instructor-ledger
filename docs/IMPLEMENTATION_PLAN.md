@@ -22,6 +22,10 @@ Trade-offs made during design. Each is the chosen path; the rejected alternative
 
 - **Instructors merged into `users` with a `role` column** (vs. *separate `instructors` table*). Saves a join. An instructor is just a user with a different role. The `course_instructor` and `ledger_entries` FKs all point to `users`.
 
+- **No `platform_cut_bps` snapshot on subscriptions** (vs. *per-row snapshot of the config at charge time*). The config is the single source of truth; every period's cut is computed from `config('ledger.platform_cut_bps')`. If the config ever needs to change mid-year, historical months are not recomputed — the close service's idempotency_key design is what protects them.
+
+- **No `courses.is_active` flag** (vs. *a soft-delete-style active/inactive flag*). Every attached instructor is eligible; the schema doesn't carry course lifecycle. If a course is being retired, the attachment is removed (or, in production, would be soft-deletable via a `course_instructor.ended_at`).
+
 - **`payout_attempts` info folded into `meta` JSON on `instructor_payout` rows** (vs. *separate `payout_attempts` table*). Attempt history is a diagnostic, not a hot query. Provider-side truth lives in `mock_payment_operations`; the `meta` JSON is the row-local summary. If per-attempt analytics become important, split it out.
 
 - **Command-driven money flow** (vs. *HTTP API / web UI*). The challenge brief says "you do not need a full application." Artisan commands (`ledger:charge-subscription`, `ledger:refund-subscription`, `ledger:run-payouts`) are the user interface. No controllers, no form requests, no student-facing UI. The only Filament screen is the read-only ops view.
@@ -57,9 +61,9 @@ Built and tested. Don't rebuild it.
 **Migrations**
 
 - `database/migrations/2026_06_13_000000_create_plans_table.php` — `id, name, price_cents, currency, months` (the `months` is how many sequential monthly subscriptions a single plan purchase creates)
-- `database/migrations/2026_06_13_000002_create_courses_table.php` — `id, title, is_active`
+- `database/migrations/2026_06_13_000002_create_courses_table.php` — `id, title`
 - `database/migrations/2026_06_13_000003_create_course_instructor_table.php` — `course_id, user_id, revenue_weight`, composite PK
-- `database/migrations/2026_06_13_000004_create_subscriptions_table.php` — `user_id, plan_id, status, started_at, ends_at, charged_amount_cents, currency, platform_cut_bps, provider_charge_reference (unique), charged_at`; indexes on `started_at`, `(user_id, status)`, `status`, `charged_at`
+- `database/migrations/2026_06_13_000004_create_subscriptions_table.php` — `user_id, plan_id, status, started_at, ends_at, charged_amount_cents, currency, provider_charge_reference (unique), charged_at`; indexes on `started_at`, `(user_id, status)`, `status`, `charged_at`
 - `database/migrations/2026_06_13_000005_create_ledger_entries_table.php` — `subscription_id (nullable), user_id (nullable), type, amount_cents, idempotency_key (unique), subscription_entry_id (nullable, unique — one refund per payment), currency (nullable), meta (json)`; only explicit indexes are the two uniques
 - `database/migrations/2026_06_13_000006_create_refunds_table.php` — `subscription_id, amount_cents, status, provider_refund_reference, cancel_date`; workflow tracking only, no financial logic
 
@@ -95,7 +99,7 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 
 ---
 
-## Phase 2 — Monthly payout calculator ⬜ TODO
+## Phase 2 — Monthly payout calculator ✅ DONE
 
 **`app/Services/Payouts/MonthlyPayoutCalculator.php`** — pure function, no DB writes.
 
@@ -103,21 +107,29 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 - `PayoutDraft` is a readonly DTO: `platform_cut_cents: int`, `instructor_payouts: array<int, int>` keyed by `user_id`
 - Reads all `subscription_payment` + `subscription_refund` rows in the period (via `scopeForPeriod` on `Subscription`)
 - `net = sum(payments) + sum(refunds)` (refunds already negative)
-- `platform_cut = intdiv(net × platform_cut_bps_snapshot, 10000)` — uses the `subscriptions.platform_cut_bps` snapshot, not the live config, so historical months are correct
+- `platform_cut = intdiv(net × config('ledger.platform_cut_bps'), 10000)` — uses the live config value. The `subscriptions` table has no per-subscription snapshot column. See the docblock on `MonthlyPayoutCalculator::calculate()` for the trade-off.
 - `instructor_pool = net - platform_cut`
 - For each instructor who taught an active course in the period, sum their `course_instructor.revenue_weight` across courses; `total_weight = sum of those`
 - Per-instructor: `floor(instructor_pool × weight / total_weight)`. Distribute leftover cents one at a time, highest-remainder first, tie-break by lowest `user_id`.
 - **The largest-remainder invariant is enforced by the calculator, not by the DB.** SUM of all per-instructor cents equals `instructor_pool` exactly.
 
-**Tests: `tests/Unit/Services/Payouts/MonthlyPayoutCalculatorTest.php`** — full vector coverage:
+**Tests: `tests/Unit/Services/Payouts/MonthlyPayoutCalculatorTest.php`** — 16 vectors, 32 assertions, all passing. Coverage:
 
 - Single instructor (1 course) → all pool
 - Two instructors equal weight → 50/50
-- Three instructors equal weight, pool=100 → `[34, 33, 33]` (deterministic, sum=100)
-- Weights 1/2/1, pool=210 → `[52, 105, 53]`
-- Platform cut applied: net=1000, cut_bps=3000 → platform=300, pool=700
-- Refunds reduce the pool: net after refund < net before
-- `platform_cut_bps_snapshot` is used, not the live config
+- Proportional split by weight (1:2 ratio)
+- Five equal-weight instructors sum to the exact pool
+- Largest-remainder tie-break by lowest `user_id` (three equal weights, net=100 → platform=30, pool=70, split `[24, 23, 23]`, extra cent to lowest id)
+- Multi-leftover distribution (1:2:1, no leftover; 2:1, one leftover)
+- Refund reduces the pool
+- Non-positive net (full refund) → 0 cut, 0 payouts
+- Custom `config('ledger.platform_cut_bps')` is respected
+- Invariant: `platform_cut + sum(instructor_payouts) === net` exactly (stressed with awkward amount 777)
+- Empty month → 0 cut, empty payouts
+- No active courses → platform keeps full net
+- Inactive courses don't contribute to weights
+- Cross-month isolation (June vs. July)
+- Multi-course instructor (weights summed across courses)
 
 ---
 
@@ -154,7 +166,6 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
   - Re-run with same args → returns the existing subscription, no new provider call
   - Re-run with different `date` in the same month → returns the same subscription (idempotent by month, not by exact date)
   - Re-run with `date` in a different month → new subscription, new provider call
-  - `subscriptions.platform_cut_bps` matches `config('ledger.platform_cut_bps')` at charge time
 - `tests/Feature/Console/ChargeSubscriptionCommandTest.php`
   - Successful invocation via `Artisan::call` → exit 0, expected output
   - Invalid date format → validation error, exit non-zero

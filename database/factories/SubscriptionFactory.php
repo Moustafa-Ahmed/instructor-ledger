@@ -32,7 +32,6 @@ class SubscriptionFactory extends Factory
             'ends_at' => $endsAt,
             'charged_amount_cents' => 1999,
             'currency' => 'USD',
-            'platform_cut_bps' => config('ledger.platform_cut_bps'),
             'provider_charge_reference' => 'ch_'.Str::random(24),
             'charged_at' => $startedAt,
         ];

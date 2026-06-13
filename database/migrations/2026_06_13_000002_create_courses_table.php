@@ -13,10 +13,7 @@ return new class extends Migration
         Schema::create('courses', function (Blueprint $table) {
             $table->id();
             $table->string('title');
-            $table->boolean('is_active')->default(true);
             $table->timestamps();
-
-            $table->index('is_active');
         });
     }
 

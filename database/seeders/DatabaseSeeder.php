@@ -47,7 +47,6 @@ class DatabaseSeeder extends Seeder
             'ends_at' => $startedAt->addMonth(),
             'charged_amount_cents' => $monthly->price_cents,
             'currency' => $monthly->currency,
-            'platform_cut_bps' => config('ledger.platform_cut_bps'),
             'provider_charge_reference' => 'ch_'.Str::random(24),
             'charged_at' => $startedAt,
         ]);
