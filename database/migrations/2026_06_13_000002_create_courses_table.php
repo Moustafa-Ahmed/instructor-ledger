@@ -10,18 +10,18 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::create('plans', function (Blueprint $table) {
+        Schema::create('courses', function (Blueprint $table) {
             $table->id();
-            $table->string('name');
-            $table->unsignedInteger('price_cents');
-            $table->string('currency', 3)->default('USD');
-            $table->unsignedSmallInteger('interval_days');
+            $table->string('title');
+            $table->boolean('is_active')->default(true);
             $table->timestamps();
+
+            $table->index('is_active');
         });
     }
 
     public function down(): void
     {
-        Schema::dropIfExists('plans');
+        Schema::dropIfExists('courses');
     }
 };

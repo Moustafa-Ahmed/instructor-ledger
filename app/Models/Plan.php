@@ -4,35 +4,35 @@ declare(strict_types=1);
 
 namespace App\Models;
 
-use App\Enums\PlanInterval;
+use Database\Factories\PlanFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * Subscription plan a student can buy.
+ * A subscription plan a student can buy.
  *
- * The (interval, interval_count) pair defines how often a subscription on
- * this plan renews and how long one term lasts. duration_days is denormalized
- * from that pair for cheap date math (subscription.ends_at = started_at +
- * duration_days) without recomputing the interval every time.
+ * interval_days is the number of days one term lasts. A plan with
+ * interval_days=30 is a monthly plan, 90 a quarterly plan, 365 an annual
+ * one. The challenge is single-currency and uses a single interval per
+ * plan, so we don't model (interval, interval_count) as a pair.
  */
 class Plan extends Model
 {
+    /** @use HasFactory<PlanFactory> */
     use HasFactory;
 
     protected $fillable = [
         'name',
-        'interval',
-        'interval_count',
-        'amount_cents',
+        'price_cents',
         'currency',
-        'duration_days',
+        'interval_days',
     ];
 
-    protected $casts = [
-        'interval' => PlanInterval::class,
-        'interval_count' => 'integer',
-        'amount_cents' => 'integer',
-        'duration_days' => 'integer',
-    ];
+    protected function casts(): array
+    {
+        return [
+            'price_cents' => 'integer',
+            'interval_days' => 'integer',
+        ];
+    }
 }

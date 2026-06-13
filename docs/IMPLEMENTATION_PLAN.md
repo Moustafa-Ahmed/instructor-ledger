@@ -1,5 +1,11 @@
 # Instructor Revenue Ledger — Implementation Plan
 
+## Business Decisions
+
+**Revenue Allocation:** Instructors are paid **proportionally based on the number of courses they teach**. An instructor teaching 3 courses earns 3x more than one teaching 1 course, regardless of student enrollment or course popularity.
+
+---
+
 ## Phase 0 — Starting state (already in repo)
 
 Mock payment provider is built and tested. Don't rebuild it.
@@ -23,13 +29,13 @@ Mock payment provider is built and tested. Don't rebuild it.
 
 - [x] `config/ledger.php` — `platform_cut_bps` (3000), `min_payout_cents` (1000), `currency` (USD), plus `idempotency` key namespaces (`charge` / `send` / `refund`); all env-overridable
 - [x] `app/Support/Money.php` — minimal value object: `readonly int $cents`, `readonly string $currency = 'USD'`, `add(self)`, `subtract(self)`, currency-mismatch guard
-- [x] `app/Enums/PlanInterval.php` — `Monthly` / `Quarterly` / `Annual` with `interval(int)` and `advance(CarbonImmutable, int)`
+- [x] `app/Enums/PlanInterval.php` — *removed in trim; replaced by `plans.interval_days`*
 - [x] `tests/Unit/Support/MoneyTest.php` — construction, currency default + override, add/subtract, immutability, currency mismatch throws, zero, negatives
 - [x] `pint.json` — `laravel` preset + `declare_strict_types`
 
 **Still to do in this phase:**
 
-- [ ] `app/Models/Plan.php` + migration (`name`, `interval` enum, `interval_count`, `amount_cents`, `currency`, `duration_days`) + factory
+- [ ] `app/Models/Plan.php` + migration (`name`, `price_cents`, `currency`, `interval_days`) + factory
 - [x] `instructors` storage: **separate `instructors` table**, FK to `users` (`user_id` nullable)
 - [x] Course access model: **subscription → all active courses** for the period; no `enrollments` table
 - [ ] First migration run (`php artisan migrate:fresh`) — push, review
@@ -49,7 +55,7 @@ Migrations + models + factories + seeders.
 - [ ] `revenue_allocations` + model — signed `amount_cents`, `kind` enum (`accrual`/`reversal`), append-only enforced in code
 - [ ] `refunds` + model
 - [ ] `payout_periods` + model — unique `(year, month)`
-- [ ] `payouts` + model — `status` enum (`pending`/`sent`/`failed`/`reconciling`, no `processing`)
+- [ ] `payouts` + model — `status` enum (`pending`/`sent`/`failed`/`reconciling`/`reconciled`/`clawed_back`, no `processing`); `reconciled` and `clawed_back` are terminal states used by Phase 6 reconciliation, `PayInstructorJob`/`ReconcilePayoutJob` must handle the new transitions
 - [ ] `payout_attempts` + model — `status` enum (`succeeded`/`failed`/`timeout`)
 - [ ] Composite uniques: `(year, month)` on payout_periods, `payout:{period_id}:{instructor_id}` on payouts, `(subscription_id, kind, source_allocation_id)` on revenue_allocations
 - [ ] Factories + seeders: 1 plan, 3 instructors, 2 courses with course_instructor rows, 10 subscriptions
@@ -60,20 +66,24 @@ Migrations + models + factories + seeders.
 
 ## Phase 3 — Revenue allocation
 
+**Business Rule:** Instructors earn proportionally based on the number of courses they teach.
+
 - [ ] `app/Services/Revenue/RevenueAllocator.php`
     - `allocate(Subscription)` inside `DB::transaction()` with `lockForUpdate()` on the subscription row
     - Idempotency: any existing `revenue_allocations` for this subscription → return early
     - `platform_share = intdiv(charged_amount × platform_cut_bps, 10000)` (cents)
     - `instructor_pool = charged_amount − platform_share`
-    - Pull `(instructor_id, revenue_weight)` for every instructor with at least one active course in the subscription period
-    - **Largest-remainder allocation:** `floor(pool × weight / total_weight)` per share, distribute leftover cents one at a time highest-remainder-first, tie-break by lowest `instructor_id`
-    - Insert one `revenue_allocations` row per instructor (`kind=accrual`, signed positive)
+    - Query instructors with active courses during the subscription period
+    - **Calculate instructor weight:** For each eligible instructor, sum `course_instructor.revenue_weight` across all active courses they teach (weight = course count)
+    - **Largest-remainder allocation:** `floor(pool × weight / total_weight)` per instructor, distribute leftover cents one at a time highest-remainder-first, tie-break by lowest `instructor_id`
+    - Insert one `revenue_allocations` row per instructor (`kind=accrual`, `amount_cents` signed positive)
     - `SUM(inserted.amount_cents) === instructor_pool` always
 - [ ] `tests/Unit/Services/Revenue/RevenueAllocatorTest.php`
-    - Single instructor → all pool to them
-    - Two equal weights → exact 50/50
-    - Three equal weights with `pool=100` → `[33, 33, 34]` (sum 100, deterministic)
-    - Pool that doesn't divide evenly across unequal weights → all cents allocated, highest remainder first
+    - Single instructor (1 course) → all pool to them
+    - Two instructors with equal course counts (1 course each) → 50/50 split
+    - Instructor teaching 2 courses, another 1 course → 2/3 and 1/3 split
+    - Three instructors with different course counts → correct proportional allocation
+    - Allocation with remainder: 3 instructors teaching 1 course each, pool=100 → `[34, 33, 33]` or similar (sum 100, deterministic)
     - Platform cut applied correctly
     - Idempotent: second call returns the same row set
     - Invariant: `SUM(allocations.amount_cents) = subscriptions.charged_amount_cents − platform_share`
@@ -133,7 +143,6 @@ Migrations + models + factories + seeders.
 - [ ] `app/Filament/Resources/PayoutResource.php` (read-only)
     - Columns: instructor, period, amount, status, sent_at, provider_reference
     - Filters: instructor, period, status, date range
-- [ ] `app/Filament/Resources/PayoutPeriodResource.php` (bonus) — list periods, status, completed_at, payout count, total cents
 - [ ] Admin user seeder
 
 ---
