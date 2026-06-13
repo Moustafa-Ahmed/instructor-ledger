@@ -15,7 +15,7 @@ return new class extends Migration
             $table->string('name');
             $table->unsignedInteger('price_cents');
             $table->string('currency', 3)->default('USD');
-            $table->unsignedSmallInteger('interval_days');
+            $table->unsignedTinyInteger('months');
             $table->timestamps();
         });
     }

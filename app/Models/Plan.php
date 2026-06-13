@@ -11,10 +11,16 @@ use Illuminate\Database\Eloquent\Model;
 /**
  * A subscription plan a student can buy.
  *
- * interval_days is the number of days one term lasts. A plan with
- * interval_days=30 is a monthly plan, 90 a quarterly plan, 365 an annual
- * one. The challenge is single-currency and uses a single interval per
- * plan, so we don't model (interval, interval_count) as a pair.
+ * `months` is how many sequential monthly subscriptions a single
+ * purchase creates. A 1-month plan is one subscription, a 3-month
+ * plan is three sequential subscriptions (one per calendar month),
+ * a 12-month plan is twelve. All subscriptions are aligned to
+ * calendar-month boundaries; `started_at` is the first day of the
+ * month, `ends_at` the last.
+ *
+ * price_cents is the per-month price; the student pays price_cents
+ * per month of access, and the platform_cut_bps snapshot on each
+ * subscription is what the platform retains from that payment.
  */
 class Plan extends Model
 {
@@ -25,14 +31,14 @@ class Plan extends Model
         'name',
         'price_cents',
         'currency',
-        'interval_days',
+        'months',
     ];
 
     protected function casts(): array
     {
         return [
             'price_cents' => 'integer',
-            'interval_days' => 'integer',
+            'months' => 'integer',
         ];
     }
 }

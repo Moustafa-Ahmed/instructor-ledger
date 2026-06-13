@@ -20,7 +20,7 @@ class PlanFactory extends Factory
             'name' => $this->faker->words(2, true),
             'price_cents' => $this->faker->numberBetween(1000, 50000),
             'currency' => 'USD',
-            'interval_days' => $this->faker->randomElement([30, 90, 365]),
+            'months' => 1,
         ];
     }
 
@@ -28,7 +28,7 @@ class PlanFactory extends Factory
     {
         return $this->state(fn () => [
             'name' => 'Monthly',
-            'interval_days' => 30,
+            'months' => 1,
         ]);
     }
 
@@ -36,7 +36,7 @@ class PlanFactory extends Factory
     {
         return $this->state(fn () => [
             'name' => 'Quarterly',
-            'interval_days' => 90,
+            'months' => 3,
         ]);
     }
 
@@ -44,7 +44,7 @@ class PlanFactory extends Factory
     {
         return $this->state(fn () => [
             'name' => 'Annual',
-            'interval_days' => 365,
+            'months' => 12,
         ]);
     }
 }

@@ -22,8 +22,8 @@ class LedgerEntryFactory extends Factory
     {
         return [
             'subscription_id' => Subscription::factory(),
-            'user_id' => User::factory()->instructor(),
-            'type' => LedgerEntryType::Allocation,
+            'user_id' => User::factory(),
+            'type' => LedgerEntryType::SubscriptionPayment,
             'amount_cents' => $this->faker->numberBetween(100, 100000),
             'idempotency_key' => 'ledger:'.Str::random(20),
             'subscription_entry_id' => null,
@@ -31,34 +31,54 @@ class LedgerEntryFactory extends Factory
         ];
     }
 
-    public function allocation(): static
+    public function subscriptionPayment(): static
     {
         return $this->state(fn () => [
-            'type' => LedgerEntryType::Allocation,
+            'type' => LedgerEntryType::SubscriptionPayment,
+            'subscription_id' => Subscription::factory(),
+            'user_id' => User::factory(),
             'subscription_entry_id' => null,
+            'idempotency_key' => 'payment:'.Str::random(20),
         ]);
     }
 
-    public function reversalOf(LedgerEntry $source): static
+    public function subscriptionRefundOf(LedgerEntry $source): static
     {
         return $this->state(fn () => [
-            'type' => LedgerEntryType::Allocation,
+            'type' => LedgerEntryType::SubscriptionRefund,
             'amount_cents' => -$source->amount_cents,
             'subscription_id' => $source->subscription_id,
             'user_id' => $source->user_id,
             'subscription_entry_id' => $source->id,
-            'idempotency_key' => 'reversal:'.Str::random(20),
+            'idempotency_key' => 'refund:'.Str::random(20),
         ]);
     }
 
-    public function payout(): static
+    public function platformCut(int $year, int $month, int $amountCents): static
     {
         return $this->state(fn () => [
-            'type' => LedgerEntryType::Payout,
-            'amount_cents' => -$this->faker->numberBetween(1000, 100000),
+            'type' => LedgerEntryType::PlatformCut,
+            'amount_cents' => -$amountCents,
             'subscription_id' => null,
-            'user_id' => User::factory()->instructor(),
-            'idempotency_key' => 'payout:'.Str::random(20),
+            'user_id' => null,
+            'subscription_entry_id' => null,
+            'idempotency_key' => "platform_cut:{$year}-{$month}",
         ]);
+    }
+
+    public function instructorPayout(int $year, int $month, int $amountCents, ?User $instructor = null): static
+    {
+        return $this->state(function () use ($year, $month, $amountCents, $instructor) {
+            $userId = $instructor?->id ?? User::factory()->instructor()->create()->id;
+
+            return [
+                'type' => LedgerEntryType::InstructorPayout,
+                'amount_cents' => -$amountCents,
+                'subscription_id' => null,
+                'user_id' => $userId,
+                'subscription_entry_id' => null,
+                'idempotency_key' => "payout:{$year}-{$month}:user:{$userId}",
+            ];
+        });
     }
 }

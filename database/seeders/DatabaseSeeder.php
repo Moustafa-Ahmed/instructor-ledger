@@ -9,8 +9,8 @@ use App\Models\Course;
 use App\Models\Plan;
 use App\Models\Subscription;
 use App\Models\User;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Str;
 
 class DatabaseSeeder extends Seeder
@@ -21,7 +21,7 @@ class DatabaseSeeder extends Seeder
             'name' => 'Monthly',
             'price_cents' => 1999,
             'currency' => 'USD',
-            'interval_days' => 30,
+            'months' => 1,
         ]);
 
         $alice = User::factory()->instructor()->create(['name' => 'Alice']);
@@ -37,16 +37,17 @@ class DatabaseSeeder extends Seeder
         }
 
         $student = User::factory()->create();
-        $startedAt = Carbon::now()->subDays(30);
+        $startedAt = CarbonImmutable::now()->startOfMonth();
 
         Subscription::create([
             'user_id' => $student->id,
             'plan_id' => $monthly->id,
             'status' => SubscriptionStatus::Active,
             'started_at' => $startedAt,
-            'ends_at' => $startedAt->copy()->addDays($monthly->interval_days),
+            'ends_at' => $startedAt->addMonth(),
             'charged_amount_cents' => $monthly->price_cents,
             'currency' => $monthly->currency,
+            'platform_cut_bps' => config('ledger.platform_cut_bps'),
             'provider_charge_reference' => 'ch_'.Str::random(24),
             'charged_at' => $startedAt,
         ]);

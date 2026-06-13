@@ -10,11 +10,15 @@ return [
     |--------------------------------------------------------------------------
     |
     | Expressed in basis points (1 bp = 0.01%). 3000 bps = 30%.
-    | The platform keeps this share of every subscription charge. The
-    | remainder is the instructor pool that gets split between instructors.
+    | The platform keeps this share of every subscription payment. The
+    | remainder is the instructor pool that gets paid out monthly.
     |
-    | Change with care: changing this affects how every new subscription is
-    | allocated, but historical allocations are never recomputed.
+    | The cut is snapshotted onto each `subscriptions` row at charge
+    | time, so historical payouts remain correct if this value later
+    | changes. The actual `platform_cut` row in `ledger_entries` is
+    | written by the monthly payout run (covering month N, run in
+    | month N+1) and uses the snapshot from the underlying
+    | subscriptions, not this config value.
     |
     */
 

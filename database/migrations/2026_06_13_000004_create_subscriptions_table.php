@@ -27,6 +27,7 @@ return new class extends Migration
 
             $table->index(['user_id', 'status']);
             $table->index('status');
+            $table->index('started_at');
             $table->index('charged_at');
         });
     }
