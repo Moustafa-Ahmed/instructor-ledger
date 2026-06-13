@@ -51,7 +51,7 @@ class MockPaymentProvider
     }
 
     /**
-     * Send money to an instructor.
+     * Send money to an instructor or a student refund.
      */
     public function sendMoney(string $idempotencyKey, int $amountCents, string $currency, array $metadata = []): array
     {

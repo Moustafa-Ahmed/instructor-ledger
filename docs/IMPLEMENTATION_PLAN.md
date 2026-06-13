@@ -1,14 +1,8 @@
 # Instructor Revenue Ledger — Implementation Plan
 
-> Project: `D:\Personal\Demo-projects\Instructor-ledger\instructor-ledger`
-> Stack: Laravel 11 · Pest 4 · Filament v3 · SQLite (tests) · MySQL (prod) · Mock Payment Provider
-> Approach: **You build, I guide + review** (no team spawn).
+## Phase 0 — Starting state (already in repo)
 
----
-
-## 0. Starting state (already in repo)
-
-The mock payment provider is already built and tested. Don't rebuild it.
+Mock payment provider is built and tested. Don't rebuild it.
 
 - `app/Services/Payments/MockPaymentProvider.php` — `chargeMoney()` / `sendMoney()` with idempotency keys
 - `app/Models/MockPaymentOperation.php` — `mock_payment_operations` table
@@ -23,222 +17,162 @@ The mock payment provider is already built and tested. Don't rebuild it.
 
 ---
 
-## 1. Design decisions (locked in by user)
+## Phase 1 — Foundation
 
-| Decision | Choice |
-|---|---|
-| Who does the work | You implement, I guide + review |
-| Allocation split | **Weighted by courses taught** (`course_instructor.revenue_weight`, default 1) |
-| Platform cut | **Config-driven basis points**, default 3000 (= 30%) in `config/ledger.php` |
-| Rounding | **Banker's rounding** (round-half-to-even) per share; sub-cent dust → synthetic platform allocation row |
-| Money representation | **Integer cents only**, `App\Support\Money` value object — no floats |
-| Allocations | **Append-only ledger** (`revenue_allocations` rows); balance = SUM(allocations) − SUM(paid) |
-| Idempotency layers | 3: (a) charge key, (b) `payout_attempts.provider_reference` unique, (c) job `uniqueId()` + `lockForUpdate()` |
+**On disk:**
 
-**Allocation invariant:** `SUM(revenue_allocations.amount_cents per subscription) = subscriptions.charged_amount_cents` for every subscription, always.
+- [x] `config/ledger.php` — `platform_cut_bps` (3000), `min_payout_cents` (1000), `currency` (USD), plus `idempotency` key namespaces (`charge` / `send` / `refund`); all env-overridable
+- [x] `app/Support/Money.php` — minimal value object: `readonly int $cents`, `readonly string $currency = 'USD'`, `add(self)`, `subtract(self)`, currency-mismatch guard
+- [x] `app/Enums/PlanInterval.php` — `Monthly` / `Quarterly` / `Annual` with `interval(int)` and `advance(CarbonImmutable, int)`
+- [x] `tests/Unit/Support/MoneyTest.php` — construction, currency default + override, add/subtract, immutability, currency mismatch throws, zero, negatives
+- [x] `pint.json` — `laravel` preset + `declare_strict_types`
+
+**Still to do in this phase:**
+
+- [ ] `app/Models/Plan.php` + migration (`name`, `interval` enum, `interval_count`, `amount_cents`, `currency`, `duration_days`) + factory
+- [x] `instructors` storage: **separate `instructors` table**, FK to `users` (`user_id` nullable)
+- [x] Course access model: **subscription → all active courses** for the period; no `enrollments` table
+- [ ] First migration run (`php artisan migrate:fresh`) — push, review
+
+> `Money` stays minimal by design. Allocator does its own math in Phase 3 with `intdiv` + largest-remainder — not as `Money` methods. Allocator owns its math; `Money` stays a dumb container.
 
 ---
 
-## 2. Build order (sequential, tests as you go)
+## Phase 2 — Domain schema
 
-### T1. Foundation
-- [ ] `config/ledger.php` — `platform_cut_bps` (default 3000), `min_payout_cents` (default 1000), `payout_currency` (default 'USD')
-- [ ] `app/Support/Money.php` — value object wrapping `int $cents`, `Currency $currency`
-  - Methods: `of()`, `plus()`, `minus()`, `multiply()`, `__toString()`, `bankerRound(int $divisor): array{cents, dust}`
-  - Static `split(Money $total, array<int> $weights): array{shares: array<int, int>, dust: int}` — banker's rounding, returns dust separately
-- [ ] `app/Models/Plan.php` + migration — `name`, `interval` (monthly/quarterly/annual), `interval_count`, `amount_cents`, `currency`, `duration_days`
-- [ ] Decide: **separate `instructors` table vs flag on `users`** — see §3 below; my rec: separate table
+Migrations + models + factories + seeders.
 
-### T2. Domain schema (migrations + models + factories + seeders)
-- [ ] `instructors` — `id`, `user_id` FK, `display_name`, `payout_destination` (string, opaque to us), `default_revenue_weight` int default 1, timestamps
-- [ ] `courses` — `id`, `title`, `slug`, `is_active` bool, timestamps
-- [ ] `course_instructor` — `course_id`, `instructor_id`, `revenue_weight` int default 1, composite PK + indexes
-- [ ] `subscriptions` — `id`, `student_user_id` FK, `plan_id` FK, `status` (pending/active/refunded/cancelled), `started_at`, `ends_at`, `charged_amount_cents`, `currency`, `provider_charge_reference` UNIQUE, `charged_at`, timestamps
-- [ ] `revenue_allocations` (**append-only ledger**) — `id`, `subscription_id` FK, `instructor_id` FK nullable (NULL = platform dust), `kind` enum(accrual|reversal|dust), `amount_cents` (signed? keep unsigned + use `kind` for sign), `source_allocation_id` FK nullable (for reversals), `idempotency_key` UNIQUE, timestamps
-  - Indexes: `(subscription_id, kind)`, `(instructor_id, created_at)`
-- [ ] `payout_batches` — `id`, `period_start`, `period_end`, `status` enum(building|processing|completed|failed), `total_amount_cents`, `instructor_count`, `created_at`, `completed_at`
-- [ ] `payouts` — `id`, `batch_id` FK, `instructor_id` FK, `amount_cents`, `status` enum(pending|sent|failed|reconciling|clawed_back), `idempotency_key` UNIQUE, `provider_reference` nullable, `sent_at`, `failed_reason`, timestamps
-- [ ] `payout_attempts` — `id`, `payout_id` FK, `provider_reference` nullable, `status`, `attempted_at`, `response_payload` json, `error_message` nullable
-- [ ] `refunds` — `id`, `subscription_id` FK, `amount_cents`, `reason`, `provider_refund_reference` UNIQUE nullable, `status` enum(pending|completed|failed), `processed_at`, timestamps
-- [ ] All composite uniques you'll rely on: `(subscription_id, kind, source_allocation_id)` for reversals, `(payout_id, status)` for attempts
+- [ ] `instructors` + model
+- [ ] `courses` + model
+- [ ] `course_instructor` pivot + model
+- [ ] `subscriptions` + model — `platform_cut_bps` snapshot column, `status` enum
+- [ ] `revenue_allocations` + model — signed `amount_cents`, `kind` enum (`accrual`/`reversal`), append-only enforced in code
+- [ ] `refunds` + model
+- [ ] `payout_periods` + model — unique `(year, month)`
+- [ ] `payouts` + model — `status` enum (`pending`/`sent`/`failed`/`reconciling`, no `processing`)
+- [ ] `payout_attempts` + model — `status` enum (`succeeded`/`failed`/`timeout`)
+- [ ] Composite uniques: `(year, month)` on payout_periods, `payout:{period_id}:{instructor_id}` on payouts, `(subscription_id, kind, source_allocation_id)` on revenue_allocations
+- [ ] Factories + seeders: 1 plan, 3 instructors, 2 courses with course_instructor rows, 10 subscriptions
 
-### T3. Revenue allocation service
+**Push after this phase. Reviewer checks schema before any money-moving code lands.**
+
+---
+
+## Phase 3 — Revenue allocation
+
 - [ ] `app/Services/Revenue/RevenueAllocator.php`
-  - `allocate(Subscription $subscription): void` — wraps everything in `DB::transaction()` with `lockForUpdate()` on the subscription row
-  - Steps:
-    1. Idempotency check: if any allocation with `kind=accrual` exists for this subscription → return early
-    2. Compute `instructor_pool = charged_amount × (1 − platform_cut_bps/10000)` (use `Money`)
-    3. Pull all `(instructor_id, weight)` pairs from `course_instructor` where the course was active in the subscription period (default: all active courses — see §3)
-    4. `Money::split($instructor_pool, $weights)` → `[shares, dust]`
-    5. Insert one allocation row per instructor (accrual)
-    6. If `dust > 0`, insert one allocation row with `instructor_id=NULL, kind=dust, amount_cents=dust`
-  - Listens for `charge.succeeded` (event) or called directly — your call
-- [ ] Unit tests: `tests/Unit/Services/Revenue/RevenueAllocatorTest.php`
-  - Single instructor → all goes to them
-  - Two equal weights → banker's rounding
-  - Three weights with `100/3` split → banker's rounding vector (e.g. 100 cents split 33/33/34 or 34/33/33)
-  - Dust row inserted when remainder is non-zero
-  - Idempotent: second call returns same rows
-  - Platform cut applied correctly
-  - Subscription invariant: SUM(allocations) = charged_amount
+    - `allocate(Subscription)` inside `DB::transaction()` with `lockForUpdate()` on the subscription row
+    - Idempotency: any existing `revenue_allocations` for this subscription → return early
+    - `platform_share = intdiv(charged_amount × platform_cut_bps, 10000)` (cents)
+    - `instructor_pool = charged_amount − platform_share`
+    - Pull `(instructor_id, revenue_weight)` for every instructor with at least one active course in the subscription period
+    - **Largest-remainder allocation:** `floor(pool × weight / total_weight)` per share, distribute leftover cents one at a time highest-remainder-first, tie-break by lowest `instructor_id`
+    - Insert one `revenue_allocations` row per instructor (`kind=accrual`, signed positive)
+    - `SUM(inserted.amount_cents) === instructor_pool` always
+- [ ] `tests/Unit/Services/Revenue/RevenueAllocatorTest.php`
+    - Single instructor → all pool to them
+    - Two equal weights → exact 50/50
+    - Three equal weights with `pool=100` → `[33, 33, 34]` (sum 100, deterministic)
+    - Pool that doesn't divide evenly across unequal weights → all cents allocated, highest remainder first
+    - Platform cut applied correctly
+    - Idempotent: second call returns the same row set
+    - Invariant: `SUM(allocations.amount_cents) = subscriptions.charged_amount_cents − platform_share`
 
-### T4. Payout engine
-- [ ] `app/Console/Commands/BuildPayoutBatch.php` — `php artisan ledger:build-payout-batch {--period-end=...} {--min-payout=...}`
-  - For each instructor: `outstanding = SUM(accrual) − SUM(reversal) − SUM(paid_in_completed_batches)`
-  - If `outstanding >= min_payout_cents`: insert a `payouts` row (status=pending) into a new `payout_batches` row
-  - Idempotency: batch key = `(period_start, period_end, instructor_id)` — re-running won't create duplicates
-  - Dispatches one `PayInstructorJob` per pending payout at the end
+---
+
+## Phase 4 — Refunds
+
+- [ ] `app/Services/Refunds/RefundSubscriptionAction.php`
+    - `refund(Subscription, int $amountCents, string $reason): Refund`
+    - Inside `DB::transaction()` with `lockForUpdate()` on subscription
+    - Validate: `amount_cents <= (charged_amount − SUM(prior refunds))`
+    - Call provider's `refundMoney(...)` with deterministic idempotency key
+    - Write `refunds` row
+    - **Reversals mirror original accrual distribution:** for each accrual row, `reversal_amount = floor(accrual.amount × refund_amount / charged_amount)`, remainder assigned to highest-weight instructor (tie-break by lowest instructor_id)
+    - Insert one `revenue_allocations` row per affected instructor with `kind=reversal`, `amount_cents = -reversal_amount`, `source_allocation_id = accrual.id`
+    - If fully refunded → `subscriptions.status = 'refunded'`
+- [ ] `tests/Feature/Refunds/RefundTest.php` — full refund, partial refund, refund-after-payout, invariant still holds
+
+---
+
+## Phase 5 — Payout engine
+
+- [ ] `app/Console/Commands/RunPayoutsCommand.php` — `php artisan ledger:run-payouts`
+    - Resolve target period (default: previous calendar month; `--year` / `--month` flags)
+    - Load-or-create `payout_periods` row (unique on `(year, month)`)
+    - If period is `completed` and `--force` not passed, exit early
+    - Inside a transaction: mark period `pending`, compute instructor earnings, create `payouts` rows (idempotency key `payout:{period_id}:{instructor_id}`)
+    - Dispatch one `PayInstructorJob` per pending payout
 - [ ] `app/Jobs/PayInstructorJob.php`
-  - `implements ShouldBeUnique`, `uniqueId = payout->id`, lock TTL 600s
-  - `public function __construct(public int $payoutId)` — **never put the Eloquent model in the constructor** (stale serialization)
-  - In `handle(MockPaymentProvider $provider)`:
-    1. `lockForUpdate()` on the payout row
-    2. If `status != pending` → return (idempotent exit)
-    3. Call `$provider->sendMoney($payout->idempotency_key, $payout->amount_cents, $currency, ['payout_id' => $payout->id])`
-    4. On success: payout.status = sent, payout.provider_reference, payout.sent_at = now()
-    5. On `MockPaymentProviderFailedException`: payout.status = failed, payout.failed_reason, do NOT retry
-    6. On `MockPaymentProviderTimeoutException`: payout.status = reconciling, dispatch `ReconcilePayoutJob($payoutId)`, with backoff
-  - All wrapped in a DB transaction
+    - `implements ShouldBeUnique`, `uniqueId = payout->id`, lock TTL 600s
+    - Constructor takes `int $payoutId` only (never the Eloquent model)
+    - `lockForUpdate()` on payout; if `status != pending` → return (idempotent exit)
+    - Call `$provider->sendPayout(payout.idempotency_key, ...)`
+    - `succeeded` → `payout.status = sent`, set `provider_reference`, `sent_at`; insert `payout_attempts` row
+    - `failed` (permanent) → `payout.status = failed`, `failed_reason`; do **not** retry
+    - `timeout` → `payout.status = reconciling`; dispatch `ReconcilePayoutJob` with backoff; insert `payout_attempts` row with `status=timeout`
 - [ ] `app/Jobs/ReconcilePayoutJob.php`
-  - Backoff: 10s, 30s, 2m, 5m, 30m (5 attempts)
-  - Calls `$provider->status($payout->provider_reference)` if known, else `statusByIdempotencyKey('send', $payout->idempotency_key)`
-  - On `succeeded` → finalize payout to `sent`
-  - On `failed` → payout.status = failed
-  - On still-unknown → release back to queue
-  - Final attempt → payout.status = failed, mark for manual review (status field on payout)
-- [ ] Test: `tests/Feature/Payouts/PayoutCommandTest.php` — running command twice never double-pays
-- [ ] Test: `tests/Feature/Payouts/PayInstructorJobTest.php` — `Bus::fake()` to simulate retry; verify one provider call
-- [ ] Test: `tests/Feature/Payouts/ReconcilePayoutJobTest.php` — timeout → reconciling → eventually settled
+    - Backoff: 10s, 30s, 2m, 5m, 30m. 5 attempts total
+    - Query provider via `checkStatus($provider_reference)` if known, else `checkStatusByIdempotencyKey(...)`
+    - `succeeded` → `sent`; `failed` → `failed`; `unknown` → release back to queue
+    - **After final attempt with state still unknown → `failed` + `reconciliation_exhausted` flag in Filament**
+- [ ] `tests/Feature/Payouts/RunPayoutsCommandTest.php` — double-run, totals match, no duplicates
+- [ ] `tests/Feature/Payouts/PayInstructorJobTest.php` — retried job still makes one provider call
+- [ ] `tests/Feature/Payouts/ReconcilePayoutJobTest.php` — timeout → reconciling → eventually settled
 
-### T5. Refund handling
-- [ ] `app/Models/Refund.php` + service `app/Services/Refunds/RefundSubscriptionAction.php`
-- [ ] `refund(Subscription, int $amountCents, string $reason): Refund`
-  - Wraps in `DB::transaction()` with `lockForUpdate()` on subscription
-  - Validates: `amount <= (charged_amount − already_refunded)`
-  - Calls `MockPaymentProvider` to do the actual refund (add a `refundMoney()` method if needed — or treat refund as a negative charge using `chargeMoney()` with a dedicated idempotency key namespace)
-  - Writes `refunds` row
-  - Pro-rates the negative across instructors proportionally to their existing allocations:
-    - For each `accrual` allocation: `reversal_amount = floor(accrual.amount × refund_amount / charged_amount)`, track remainder
-    - Insert a `kind=reversal` row per instructor (mirroring the original `source_allocation_id`)
-    - Distribute any rounding remainder as an additional `kind=reversal` row against the highest-weight instructor (deterministic by id)
-  - Sets `subscriptions.status = 'refunded'` if fully refunded
-- [ ] Edge case: **refund issued after payout sent**
-  - The instructor already received money they now need to "give back"
-  - Ledger correctly shows negative outstanding balance
-  - Mark all *future* payouts for that instructor as `clawed_back` state (we're not actually clawing back real money from a bank in this challenge — that's a separate process — but the ledger MUST reflect the negative balance)
-  - Document this in ARCHITECTURE.md
-- [ ] Test: `tests/Feature/Refunds/RefundTest.php` — full refund, partial refund, refund-after-payout, subscription invariant still holds
+---
 
-### T6. Filament v3
+## Phase 6 — Filament
+
 - [ ] `composer require filament/filament:"^3.2" -W`
-- [ ] `php artisan filament:install --panels` (or skip panel and use standalone; my rec: use the admin panel — it's the standard)
-- [ ] Create `app/Filament/Resources/InstructorResource.php` (read-only)
-  - Table columns: name, **accrued_cents** (SUM accruals), **paid_cents** (SUM sent payouts), **outstanding_cents** (accrued − paid − reversed), last_payout_at
-  - Use a custom accessor on the model OR a query scope — don't materialize
-- [ ] Create `app/Filament/Resources/PayoutResource.php` (read-only)
-  - Filters: instructor, batch, status, date range
-  - Columns: instructor, batch, amount, status, sent_at, provider_reference
-- [ ] Register an admin user (seed or first-user check) so you can demo the screen
+- [ ] `php artisan filament:install --panels`
+- [ ] `app/Filament/Resources/InstructorResource.php` (read-only)
+    - Columns: name, **earned_cents** (accruals − reversals), **paid_cents** (sum sent payouts), **outstanding_cents** (signed), last_payout_at
+    - Use a custom accessor or query scope — don't materialize
+    - Negative outstanding → visual flag ("balance owed back")
+- [ ] `app/Filament/Resources/PayoutResource.php` (read-only)
+    - Columns: instructor, period, amount, status, sent_at, provider_reference
+    - Filters: instructor, period, status, date range
+- [ ] `app/Filament/Resources/PayoutPeriodResource.php` (bonus) — list periods, status, completed_at, payout count, total cents
+- [ ] Admin user seeder
 
-### T7. Critical tests (the ones the rubric calls out)
-- [ ] `tests/Feature/Payouts/DoubleRunTest.php` — run `BuildPayoutBatch` twice with same period → no duplicate payouts, totals match
-- [ ] `tests/Feature/Payouts/RetriedJobTest.php` — simulate Laravel retrying `PayInstructorJob` → still one provider call (mock with `Mockery::spy` and assert `sendMoney` called once)
+---
+
+## Phase 7 — Critical tests (rubric)
+
+- [ ] `tests/Feature/Payouts/DoubleRunTest.php` — `RunPayoutsCommand` twice, same period → no duplicate payouts, totals match
+- [ ] `tests/Feature/Payouts/RetriedJobTest.php` — `PayInstructorJob` retried via `Bus::fake()` → still one provider call (assert with `Mockery::spy`)
 - [ ] `tests/Feature/Payouts/ProviderTimeoutTest.php` — `useDeterministicOutcomes(OUTCOME_TIMEOUT_AFTER_SUCCESS)` → eventually settles to `sent` via reconciliation
-- [ ] `tests/Unit/Support/MoneyTest.php` — banker's rounding vector tests + dust accumulation
 - [ ] `tests/Feature/Refunds/RefundAfterPayoutTest.php` — pay out, then refund, balances go negative correctly
-- [ ] `tests/Feature/LedgerIntegrityTest.php` — for N random subscriptions, SUM(allocations) = charged_amount; SUM across all instructors + dust = charged_amount
-- [ ] All existing mock provider tests should still pass (`vendor/bin/pest`)
+- [ ] `tests/Feature/LedgerIntegrityTest.php` — for N random subscriptions, `SUM(allocations) = charged_amount − platform_share`
+- [ ] `tests/Unit/Services/Revenue/RevenueAllocatorTest.php` — full vector coverage (built in Phase 3)
+- [ ] All existing mock provider tests still pass (`vendor/bin/pest`)
 
-### T8. Docs
+---
+
+## Phase 8 — Docs
+
 - [ ] `README.md` — rewrite (currently Laravel boilerplate)
-  - Project summary
-  - Setup: `composer install`, `cp .env.example .env`, `php artisan key:generate`, `php artisan migrate --seed`
-  - Run tests: `vendor/bin/pest`
-  - Run demo: `php artisan ledger:build-payout-batch` etc.
-  - Assumptions (platform cut 30%, etc.)
+    - Project summary
+    - Setup: `composer install`, `cp .env.example .env`, `php artisan key:generate`, `php artisan migrate --seed`
+    - Run tests: `vendor/bin/pest`
+    - Run demo: `php artisan ledger:run-payouts`, etc.
+    - Assumptions (platform cut 30%, monthly settlement, single currency, all-active-instructors allocation)
 - [ ] `docs/ARCHITECTURE.md`
-  - Domain model diagram (ASCII or describe in text)
-  - Database design rationale (why append-only ledger, why `revenue_allocations` not running balances)
-  - Revenue allocation strategy (weighted, banker's rounding, dust row)
-  - Idempotency: 3 layers explained
-  - Provider timeout handling: 3 outcomes, reconciliation worker
-  - Refund flow + clawback limitation
-  - Scaling: queue priorities, partitioning by period, batch size, indexing
-  - Known limitations (no real bank clawback, no multi-currency conversion, no instructor onboarding KYC)
-- [ ] `docs/AI_USAGE.md` (the challenge explicitly requires this)
-  - How I used AI: clarifying trade-offs, brainstorming edge cases, suggesting test vectors
-  - Workflows/prompts I relied on
-  - What AI generated vs what I designed
-  - Engineering decisions I personally made
-  - What differentiates this from a typical AI submission
-  - Trade-offs and improvements I intentionally chose
-
-### T9. Senior bonus (discussion-only)
-- [ ] `docs/SENIOR_BONUS.md` — "How would we handle a mid-term plan upgrade?"
-  - Approach: close old sub early, issue prorated refund allocation, open new sub, fresh allocation
-  - Why: avoid editing historical allocation rows (audit trail); the ledger stays append-only
-  - Edge case: student upgrades monthly → annual 10 days in
-    - Compute unused days from monthly = (30 − 10) / 30 = 66.7% of monthly fee → refund allocation
-    - Charge full annual fee → new allocation
-    - Net cash flow: student pays (annual − 0.667 × monthly); instructor balance reflects both events
-  - Discuss: would you allow downgrades? What about plan-change fees? Proration rounding?
-
-### T10. Video submission outline (15–20 min, 6 sections)
-- [ ] 0:00–2:30 Intro + relevant background
-- [ ] 2:30–7:30 Architecture walkthrough (domain model, DB, allocation, balance calc, payout)
-- [ ] 7:30–14:00 Failure scenarios (double-run, retry, timeout, timeout-then-settle, refund-after-payout, rounding)
-- [ ] 14:00–16:30 Testing strategy
-- [ ] 16:30–18:30 AI usage + decisions
-- [ ] 18:30–20:00 Future improvements (real clawback, multi-currency, partition strategy, event sourcing for audit)
+    - Domain model diagram (ASCII)
+    - Database design rationale (append-only ledger, why `payout_periods` is first-class)
+    - Revenue allocation strategy (largest-remainder)
+    - Idempotency: 3 layers
+    - Provider timeout handling: 3 outcomes, reconciliation worker
+    - Refund flow + signed-outstanding limitation
+    - Scaling notes
+    - Known limitations (no real bank clawback, no multi-currency, no engagement-based allocation)
+- [ ] `docs/AI_USAGE.md` (challenge requirement)
+    - How AI was used: trade-off discussions, edge-case brainstorming, test-vector suggestions
+    - What AI generated vs what was designed
+    - Engineering decisions made personally
+    - What differentiates this from a typical AI submission
+    - Trade-offs and improvements intentionally chosen
+- [ ] `docs/VIDEO_OUTLINE.md` — 15–20 min, 6 sections (intro, architecture, failure scenarios, testing, AI usage, future improvements)
 
 ---
-
-## 3. Open decisions for T1 (decide BEFORE writing T1 code)
-
-### 3a. Instructor storage
-- **Rec: separate `instructors` table** FK to `users`
-- Reason: payout destination, revenue weight, lifetime balances are instructor concerns; instructor may not even be a platform user with login
-- Alternative: boolean `is_instructor` + nullable columns on `users` — simpler but pollutes the users table
-
-### 3b. Course access model
-- **Rec: subscription grants access to all active courses** for the term
-- Allocation goes to every instructor with at least one active course in the subscription period
-- Reason: matches the challenge wording ("A single subscription gives access to courses from many instructors")
-- Alternative: explicit `enrollments` table — more accurate but adds schema + a new concept not in the brief
-
-Tell me your calls on 3a + 3b and I'll lock them in the doc. Then start with T1 + T2 — push migrations when green and I'll review.
-
----
-
-## 4. Key invariants (paste above your monitor while coding)
-
-1. **Integer cents only** in DB. No `DECIMAL`, no `float`. Always.
-2. **`SUM(allocations) = charged_amount`** for every subscription, every time. Test it with `LedgerIntegrityTest`.
-3. **Provider call = one row in `payout_attempts`.** No silent retries, no orphan money.
-4. **Idempotency keys are deterministic**, derived from stable IDs (e.g. `payout:{id}`), not random.
-5. **Append-only ledger.** Never `UPDATE` or `DELETE` an allocation row. Reversals = new row.
-6. **Every status transition is conditional + transactional.** Don't assume state; read it inside the lock.
-
----
-
-## 5. Risk register (watch these)
-
-| Risk | Mitigation |
-|---|---|
-| Off-by-one cent in split | Money unit tests with known vectors; integrity test on every seed |
-| Retried job double-charges | `ShouldBeUnique` + provider idempotency key + `lockForUpdate` |
-| Timeout leaves payout in limbo | `reconciling` status + dedicated reconcile job with backoff |
-| Refund after payout | Ledger goes negative; document limitation; flag for manual review |
-| Race between two batch builds | `payout_batches` unique on `(period_start, period_end)` + advisory lock |
-| Rounding dust accumulates | Single dust row per subscription is fine; test sum integrity |
-
----
-
-## 6. When you start coding
-
-1. Make your T1 calls (3a, 3b above) — reply to me
-2. Write T1 + T2 (config + Money + migrations + models)
-3. Run `php artisan migrate:fresh` locally, push the branch, ping me
-4. I'll review schema + Money before you start allocation logic
-
-I'm here for the rest — just push and I'll respond to questions, do code review, and help you think through the failure scenarios. Good luck.
