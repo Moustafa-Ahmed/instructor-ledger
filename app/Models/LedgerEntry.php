@@ -6,6 +6,7 @@ namespace App\Models;
 
 use App\Enums\LedgerEntryType;
 use Database\Factories\LedgerEntryFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -47,5 +48,13 @@ class LedgerEntry extends Model
     public function subscriptionEntry(): BelongsTo
     {
         return $this->belongsTo(self::class, 'subscription_entry_id');
+    }
+
+    /** @param Builder<self> $query */
+    public function scopePayoutRow(Builder $query, int $id): Builder
+    {
+        return $query
+            ->where('id', $id)
+            ->where('type', LedgerEntryType::InstructorPayout->value);
     }
 }

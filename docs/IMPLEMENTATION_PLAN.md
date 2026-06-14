@@ -37,6 +37,9 @@ Trade-offs made during design. Each is the chosen path; the rejected alternative
 - **Phase 5 idempotency: precheck + unique-violation catch, no row locks** (vs. _`lockForUpdate()` on subscriptions + `sharedLock` on the join_). The two SQL hints are mutually exclusive on the same query, and the unique index on `idempotency_key` already makes the race harmless. Two layers (fast precheck + catch-and-refetch on `QueryException` 23000) covers the common case and the rare race. No row locks means a re-run or a concurrent close attempt can't block readers.
 
 - **Empty / zero-net month → no rows written** (vs. _sentinel `platform_cut:YYYY-MM` row with `amount_cents = 0`_). The unique index is a gate, not a marker. Once a zero-amount row is written, a late refund that arrives later cannot be reflected in that month (the unique key blocks the non-zero rewrite). With nothing written, the month stays in the "not closed" state and a future close attempt after a late refund can produce real rows.
+- **Phase 6: `lockForUpdate()` on the ledger row** (vs. _no lock, rely on the provider's idempotency_key_). Phase 5 didn't need it — the unique `idempotency_key` index made the race harmless. Phase 6 is a different problem: it's a read-modify-write on a single row (`read meta.status` → `decide` → `write meta.status`). The precheck on `meta.status` is the fast path; the row lock makes the read-modify-write atomic. This is the only place in the codebase where `lockForUpdate()` is correct.
+
+- **Phase 6: split state machine ownership, not shared** (vs. _one service handles everything_). `PayInstructorService` owns `pending → {sent, failed, reconciling}`. `ReconcileInstructorPayoutService` owns `reconciling → {sent, failed}` plus the `reconciliation_exhausted` terminator. The two services' short-circuits on each other's states prevent clobbering.
 
 ---
 
@@ -311,32 +314,62 @@ Switched from `Carbon::create()` (mutable) to `CarbonImmutable::create()` for co
 
 ---
 
-## Phase 6 — Pay instructor + reconciliation services + jobs ⬜ TODO
+## Phase 6 — Pay instructor + reconciliation services + jobs ✅ DONE
+
+The state machine on `meta.status` is the spine of this phase:
+
+```
+  pending ──pay()──► sent          (provider said "succeeded")
+                ├──► failed        (provider said "failed" — permanent)
+                └──► reconciling   (provider timed out after a real
+                                    success; the reconcile worker
+                                    owns the resolution)
+```
+
+`reconciling ──reconcile()──► sent | failed` (provider confirms one way or the other)
+`reconciling ──reconcile()──► failed + reconciliation_exhausted` (5 attempts without a final status)
+
+Two design decisions were settled before the code was written. Each is in the code AND in this doc; the rationale lives here.
+
+> **1. `lockForUpdate()` on the ledger row — yes, here it's correct.** Contrast with Phase 5, where we lock nothing and rely on the unique index. The difference: in `CloseMonthlyPayoutService` we're inserting _new_ rows guarded by a unique key; in `PayInstructorService` we're _updating an existing row_ in a read-modify-write (`read meta.status` → `decide` → `write meta.status`). Two concurrent `pay()` calls on the same row would race on the `meta` write. The precheck on `meta.status` is the fast path; the row lock makes the read-modify-write atomic. This is the only place in the codebase where `lockForUpdate()` is correct, and the only place it's used.
+
+> **2. State machine ownership is split, not shared.** `PayInstructorService` owns `pending → {sent, failed, reconciling}`. `ReconcileInstructorPayoutService` owns `reconciling → {sent, failed}`. The reconcile worker does **not** touch `pending` rows (that's `pay()`'s job) and does **not** touch `sent`/`failed` rows (the terminal-state short-circuit prevents clobbering). The `pay()` service short-circuits on `reconciling` to prevent a re-run from re-dispatching a reconcile worker that's already in flight — a race that would result in two workers both trying to mark the same row `sent`.
+
+### `app/Services/Payouts/DTO/PayResult.php`
+
+- `status: 'sent'|'failed'|'reconciling'|'pending'` — the value `meta.status` ended up at
+- `needsReconciliation: bool` — true only when `status === 'reconciling'`; the job reads it to decide whether to dispatch the reconcile worker
+
+### `app/Exceptions/StillReconcilingException.php`
+
+- Thrown by `ReconcileInstructorPayoutService::reconcile()` when the provider still has no final status for the operation. The job does **not** catch it; the exception propagates, Laravel re-queues with the configured backoff, and the row's `meta.status` stays `reconciling`.
 
 ### `app/Services/Payouts/PayInstructorService.php`
 
 - `pay(int $ledgerEntryId): PayResult`
-- `PayResult` is a DTO with `status: 'sent'|'failed'|'reconciling'` and `needsReconciliation: bool`
 - `DB::transaction()`:
-    - Load + `lockForUpdate()` the `instructor_payout` ledger row
-    - If `meta.status` is already terminal (`sent` or `failed`) → return early with the existing status (idempotent re-run)
-    - Call `MockPaymentProvider::sendMoney($idempotencyKey, abs($amount_cents), $currency)`
-    - On `succeeded`: write `meta = {status: 'sent', provider_reference, sent_at: now()}`
-    - On `failed`: write `meta = {status: 'failed', error: $message}` (no retry — this is a permanent failure for the platform)
-    - On `timeout`: write `meta = {status: 'reconciling'}`, return `PayResult(needsReconciliation: true)`
+    - Load + `lockForUpdate()` the `instructor_payout` ledger row, scoped to `type = instructor_payout` (any other row type throws `ModelNotFoundException`).
+    - Read `meta.status` from the row. If `sent` or `failed`, return the existing status (no provider call, no DB write) — idempotent re-run.
+    - If `reconciling`, return `reconciling` (the reconcile worker owns that row).
+    - Otherwise (`pending`, or `meta` empty for legacy rows): call `MockPaymentProvider::sendMoney('send:' . $entry->idempotency_key, abs($amount_cents), $currency, [...])`. The provider's idempotency-key contract is the same outbox-pattern-lite as `chargeMoney()` / `refundMoney()` — the `mock_payment_operations` row survives a timeout, a retry finds it.
+    - **On `succeeded`:** `meta = [...prior keys, status: 'sent', provider_reference, sent_at]`. The `array_merge` preserves any prior keys (e.g. a future `attempt_count`).
+    - **On `failed`:** `meta = [...prior, status: 'failed', error, failed_at]`. No retry — permanent failure.
+    - **On `timeout`:** `meta = [...prior, status: 'reconciling', reconciling_at]`. Returns `PayResult(needsReconciliation: true)`; the job dispatches a `ReconcileInstructorPayoutJob`.
 
 ### `app/Services/Payouts/ReconcileInstructorPayoutService.php`
 
-- `reconcile(int $ledgerEntryId, int $attempts): void`
-- `markExhausted(int $ledgerEntryId): void` — called by the job's `failed()` hook
+- `reconcile(int $ledgerEntryId, int $attempts, int $maxAttempts): void`
+- `markExhausted(int $ledgerEntryId): void` — called by the job's `failed()` hook AND by `reconcile()` when attempts run out in-band
 - `DB::transaction()`:
-    - Load + `lockForUpdate()` the row
-    - If `meta.status != 'reconciling'` → return (already settled)
-    - Call `MockPaymentProvider::checkStatusByIdempotencyKey($key)`
-    - `succeeded` → `meta = {status: 'sent', provider_reference, sent_at: now()}`
-    - `failed` → `meta = {status: 'failed'}`
-    - `unknown` → throw `StillReconcilingException` (so the job releases with backoff)
-    - If the job's attempt count is at max (5), call `markExhausted()` instead of throwing
+    - Load + `lockForUpdate()` the row, scoped to `type = instructor_payout`.
+    - If `meta.status` is `sent` or `failed`, return — no-op (a competing process settled it; don't clobber).
+    - If `meta.status` is not `reconciling`, return — the reconcile worker only operates on `reconciling` rows.
+    - If `$attempts >= $maxAttempts`, write `meta = {status: 'failed', error: 'Reconciliation exhausted...', reconciliation_exhausted: true, failed_at}` and return — the in-band exhaustion path.
+    - Otherwise: `MockPaymentProvider::statusByIdempotencyKey(TYPE_SEND, 'send:' . idempotency_key)`.
+        - `ModelNotFoundException` (provider has no record yet) → throw `StillReconcilingException` → re-queue.
+        - `STATUS_SUCCEEDED` → `meta = {status: 'sent', provider_reference, sent_at, reconciled_at}`.
+        - `STATUS_FAILED` → `meta = {status: 'failed', error: 'Provider reported failed on reconciliation.', failed_at, reconciled_at}`. (Note: this is `failed` _without_ `reconciliation_exhausted` — the provider actually said no.)
+        - Anything else → throw `StillReconcilingException` → re-queue.
 
 ### `app/Jobs/PayInstructorJob.php`
 
@@ -366,7 +399,7 @@ class PayInstructorJob implements ShouldQueue, ShouldBeUnique
 }
 ```
 
-No DB code, no provider code in the job. Thin orchestrator.
+`tries = 1` because `pay()` either succeeds (row is `sent` / `failed` / `reconciling`) or throws; a retried call hits the terminal-state short-circuit and is a no-op. `ShouldBeUnique` is the cross-process gate that complements the row-level `lockForUpdate()` inside the service.
 
 ### `app/Jobs/ReconcileInstructorPayoutJob.php`
 
@@ -383,39 +416,77 @@ class ReconcileInstructorPayoutJob implements ShouldQueue
 
     public function handle(ReconcileInstructorPayoutService $service): void
     {
-        $service->reconcile($this->ledgerEntryId, $this->attempts());
+        $service->reconcile(
+            $this->ledgerEntryId,
+            $this->attempts(),
+            $this->tries,
+        );
     }
 
-    public function failed(\Throwable $e): void
+    public function failed(Throwable $e): void
     {
         app(ReconcileInstructorPayoutService::class)->markExhausted($this->ledgerEntryId);
     }
 }
 ```
 
+The backoff is exponential in seconds — 10s, 30s, 2m, 5m, 30m. The job's `failed()` hook is the belt-and-braces for unexpected exceptions; the in-band `$attempts >= $maxAttempts` check in the service is the primary path.
+
 ### Tests
 
-- `tests/Unit/Services/Payouts/PayInstructorServiceTest.php`
+- `tests/Unit/Services/Payouts/PayInstructorServiceTest.php` — **12 vectors:**
     - `succeeded` outcome → `meta.status = 'sent'`, `provider_reference` stored
     - `failed` outcome → `meta.status = 'failed'`, no retry signal
-    - `timeout` outcome → `meta.status = 'reconciling'`, `PayResult::needsReconciliation = true`
+    - `timeout_after_success` outcome → `meta.status = 'reconciling'`, `PayResult::needsReconciliation = true`
     - Re-run on a `sent` row → returns the existing status, no new provider call
     - Re-run on a `failed` row → returns the existing status, no new provider call
     - Re-run on a `reconciling` row → returns `reconciling` (the reconcile job owns that state machine)
-- `tests/Unit/Services/Payouts/ReconcileInstructorPayoutServiceTest.php`
-    - First call, status `unknown` → throws `StillReconcilingException`
-    - Subsequent call, status `succeeded` → `meta.status = 'sent'`
-    - Subsequent call, status `failed` → `meta.status = 'failed'`
-    - `markExhausted` writes `meta.status = 'failed', meta.reconciliation_exhausted = true`
-    - Re-run on a `sent` row → no-op
-- `tests/Feature/Payouts/PayInstructorJobTest.php`
-    - Job handles `succeeded` → meta updated
-    - Job handles `timeout` → dispatch a `ReconcileInstructorPayoutJob`
-    - **Retried job never double-pays** (the `unique` lock + the service's terminal-state short-circuit)
-- `tests/Feature/Payouts/ReconcileInstructorPayoutJobTest.php`
-    - First attempt with `unknown` → job re-queued
-    - Eventually settled to `sent` when provider returns `succeeded` on a later attempt
-    - Eventually exhausted after 5 attempts → `meta.reconciliation_exhausted = true`
+    - Sends a positive amount to the provider (the ledger row is negative)
+    - Uses the documented idempotency_key pattern `send:` + ledger idempotency_key
+    - Throws when the row does not exist
+    - Throws when the row is not an `instructor_payout` (e.g. `platform_cut`)
+    - **Preserves prior `meta` keys** when transitioning status (the `array_merge` semantic)
+- `tests/Unit/Services/Payouts/ReconcileInstructorPayoutServiceTest.php` — **10 vectors:**
+    - Resolves a `reconciling` row to `sent` when the provider reports succeeded
+    - Resolves a `reconciling` row to `failed` when the provider reports failed
+    - Throws `StillReconcilingException` when the provider has no record yet
+    - Marks the row as `failed` with `reconciliation_exhausted` when `$attempts >= $maxAttempts` (in-band)
+    - Does not clobber a `sent` row (the no-op path)
+    - Does not clobber a `failed` row (the no-op path)
+    - Does not touch a `pending` row (only `reconciling` is its concern)
+    - `markExhausted` writes the exhaustion flag without clobbering a `sent` row
+    - `markExhausted` writes `failed` + `reconciliation_exhausted` on a `reconciling` row
+    - Throws when the row does not exist
+- `tests/Feature/Jobs/PayInstructorJobTest.php` — **8 vectors:**
+    - Declares 1 attempt and the `ShouldBeUnique` contract
+    - Can be dispatched via `Bus::dispatch()` with the right `ledgerEntryId`
+    - Marks the row `sent` and dispatches **no** reconcile job on a succeeded outcome
+    - Marks the row `failed` and dispatches **no** reconcile job on a failed outcome
+    - Marks the row `reconciling` **and** dispatches a reconcile job on a timeout outcome
+    - Is a no-op for a row that is already `sent` (idempotent re-run)
+    - Is a no-op for a row that is already `failed` (idempotent re-run)
+    - **Does not double-dispatch** a reconcile job for a row that is already `reconciling` (the short-circuit; the in-flight reconcile worker owns the next step)
+- `tests/Feature/Jobs/ReconcileInstructorPayoutJobTest.php` — **7 vectors:**
+    - Declares 5 attempts and the configured backoff schedule
+    - Settles a `reconciling` row to `sent` when the provider reports succeeded
+    - Settles a `reconciling` row to `failed` when the provider reports failed
+    - Re-queues (throws `StillReconcilingException`) when the provider has no record yet
+    - **Marks the row `reconciliation_exhausted` when the job is past its last attempt** (in-band path)
+    - **Keeps throwing `StillReconcilingException` on attempts BEFORE the last** (so the job releases with backoff)
+    - The `failed()` hook calls `markExhausted` on the row (out-of-band path)
+
+### What Phase 6 buys Phase 8 (the rubric tests)
+
+The four "money correctness" rubric scenarios now have a real implementation to assert against:
+
+| Rubric scenario                                     | Implementation in Phase 6                                                                |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Running payouts twice never double-pays             | `PayInstructorService` terminal-state short-circuit + `PayInstructorJob::ShouldBeUnique` |
+| Retried job never double-pays                       | Same — `meta.status = 'sent'` short-circuit + `ShouldBeUnique` lock                      |
+| Unreliable provider never causes duplicate payments | `lockForUpdate()` + `meta.status` state machine + the provider's outbox-pattern-lite     |
+| Refund after payout reduces the next pool           | `MonthlyPayoutCalculator` reads sign-aware `subscription_payment + subscription_refund`  |
+
+Phase 8 will add an end-to-end test for each.
 
 ---
 

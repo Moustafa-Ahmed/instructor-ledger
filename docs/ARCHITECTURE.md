@@ -118,7 +118,10 @@ if (in_array($entry->meta['status'], ['sent', 'failed'], true)) {
 ```
 
 Four states: `pending → reconciling → sent`, with `failed` as a terminal
-alternative. `pending` is the only state written by Phase 5.
+alternative. `pending` is the only state written by Phase 5. The full
+state machine (with the `reconciliation_exhausted` terminator and the
+split ownership between `pay()` and `reconcile()`) is in Phase 6
+below (decision 8).
 
 ### 6. Idempotency keys are canonical `YYYY-MM`, zero-padded
 
@@ -127,6 +130,68 @@ for `month=6` it produces `platform_cut:2026-6`, for `month=12` it produces
 `platform_cut:2026-12`. Different months, different shapes, breaks the unique
 index contract. The service uses `sprintf('%04d-%02d', $year, $month)`
 everywhere a key is built. The `LedgerEntryFactory` matches.
+
+### 7. Phase 6: `lockForUpdate()` on the ledger row — the only place it's correct
+
+The close service (Phase 5) didn't lock anything — the unique `idempotency_key`
+index made the race harmless for _insert_ operations. Phase 6 is a different
+problem: it's a _read-modify-write on a single row_
+(`read meta.status` → `decide` → `write meta.status`). Two concurrent `pay()`
+calls on the same row would race on the `meta` write. The precheck on
+`meta.status` is the fast path; the row lock makes the read-modify-write
+atomic.
+
+```php
+DB::transaction(function () use ($ledgerEntryId) {
+    $entry = LedgerEntry::query()
+        ->where('id', $ledgerEntryId)
+        ->where('type', LedgerEntryType::InstructorPayout->value)
+        ->lockForUpdate()
+        ->firstOrFail();
+
+    $current = $this->metaStatus($entry);
+    // ... read-modify-write on meta.status ...
+});
+```
+
+The `where('type', ...)` scope is the safety belt: a `lockForUpdate()` on the
+wrong row type (e.g. a `platform_cut` row) throws `ModelNotFoundException`
+before the lock can take effect.
+
+### 8. Phase 6: split state machine ownership, not shared
+
+The state machine on `meta.status` for `instructor_payout` rows:
+
+```
+  pending ──pay()──► sent          (provider said "succeeded")
+                ├──► failed        (provider said "failed" — permanent)
+                └──► reconciling   (provider timed out after a real
+                                    success; the reconcile worker
+                                    owns the resolution)
+
+  reconciling ──reconcile()──► sent | failed
+                       └──► failed + reconciliation_exhausted
+                            (5 attempts without a final status)
+```
+
+`PayInstructorService` owns `pending → {sent, failed, reconciling}`.
+`ReconcileInstructorPayoutService` owns `reconciling → {sent, failed}` plus
+the `reconciliation_exhausted` terminator. The two services'
+short-circuits on each other's states prevent clobbering:
+
+- `pay()` on a `reconciling` row returns `reconciling` without calling the
+  provider or dispatching another reconcile worker. A second reconcile
+  worker would race the first for who marks the row `sent` first.
+- `reconcile()` on a `sent` or `failed` row returns immediately. The
+  reconcile worker does **not** overwrite a terminal status — that's the
+  job of `pay()` (which is the only one that called the provider).
+- `reconcile()` on a `pending` row returns immediately. The reconcile
+  worker only operates on `reconciling` rows; `pending` is `pay()`'s
+  concern.
+
+The "exhaustion" path is the only state transition that touches a
+non-`reconciling` row, and only via `markExhausted()` — the out-of-band
+hook called by the job's `failed()`. Even that has a `if ($status === 'sent') { return; }` guard, so an exhausted reconcile can never clobber a `sent` row.
 
 ---
 
@@ -151,7 +216,7 @@ Refund (workflow tracking only)
 
 ---
 
-## Idempotency layers (three)
+## Idempotency layers (four)
 
 1. **Provider side** — `mock_payment_operations` rows are keyed by
    `(operation_type, idempotency_key)`. A retry of the same operation
@@ -164,9 +229,18 @@ Refund (workflow tracking only)
    per-charge, per-refund, and per-close keys all live here. The
    `subscription_entry_id` is unique, so a payment can be partially
    refunded at most once.
+4. **Job side** — `PayInstructorJob` is `ShouldBeUnique` with
+   `uniqueId() = "pay-instructor:{ledgerEntryId}"` and `uniqueFor = 600`
+   seconds. Two workers can't both grab the same `ledgerEntryId` from
+   the queue. The unique lock is the cross-process gate that
+   complements the row-level `lockForUpdate()` inside
+   `PayInstructorService`. The close service doesn't need this layer —
+   the unique `idempotency_key` is enough for an insert; Phase 6's
+   read-modify-write needs the additional cross-process dedup.
 
-Three layers means a failure in one (provider timeout, app crash mid-write,
-race between two processes) is caught by another.
+Four layers means a failure in one (provider timeout, app crash mid-write,
+race between two processes, two workers picking up the same job) is
+caught by another.
 
 ---
 
