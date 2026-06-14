@@ -28,6 +28,7 @@ class Subscription extends Model
         'currency',
         'provider_charge_reference',
         'charged_at',
+        'cancel_date',
     ];
 
     protected function casts(): array
@@ -37,6 +38,7 @@ class Subscription extends Model
             'started_at' => 'immutable_datetime',
             'ends_at' => 'immutable_datetime',
             'charged_at' => 'immutable_datetime',
+            'cancel_date' => 'date',
             'charged_amount_cents' => 'integer',
         ];
     }

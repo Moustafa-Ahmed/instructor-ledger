@@ -17,6 +17,8 @@ class MockPaymentProvider
 
     public const TYPE_SEND = 'send';
 
+    public const TYPE_REFUND = 'refund';
+
     public const STATUS_SUCCEEDED = 'succeeded';
 
     public const STATUS_FAILED = 'failed';
@@ -51,12 +53,26 @@ class MockPaymentProvider
     }
 
     /**
-     * Send money to an instructor or a student refund.
+     * Send money to an instructor.
      */
     public function sendMoney(string $idempotencyKey, int $amountCents, string $currency, array $metadata = []): array
     {
         return $this->createOrReturnOperation(
             self::TYPE_SEND,
+            $idempotencyKey,
+            $amountCents,
+            $currency,
+            $metadata,
+        );
+    }
+
+    /**
+     * Refund money to a student.
+     */
+    public function refundMoney(string $idempotencyKey, int $amountCents, string $currency, array $metadata = []): array
+    {
+        return $this->createOrReturnOperation(
+            self::TYPE_REFUND,
             $idempotencyKey,
             $amountCents,
             $currency,
@@ -181,8 +197,8 @@ class MockPaymentProvider
     public function statusByIdempotencyKey(string $operationType, string $idempotencyKey): array
     {
 
-        if (! in_array($operationType, [self::TYPE_CHARGE, self::TYPE_SEND], true)) {
-            throw new InvalidArgumentException('Operation type must be charge or send.');
+        if (! in_array($operationType, [self::TYPE_CHARGE, self::TYPE_SEND, self::TYPE_REFUND], true)) {
+            throw new InvalidArgumentException('Operation type must be charge, send, or refund.');
         }
 
         if ($idempotencyKey === '') {

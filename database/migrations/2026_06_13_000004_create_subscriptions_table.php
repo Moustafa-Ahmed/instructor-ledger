@@ -22,6 +22,7 @@ return new class extends Migration
             $table->string('currency', 3)->default('USD');
             $table->string('provider_charge_reference')->unique();
             $table->timestamp('charged_at')->nullable();
+            $table->date('cancel_date')->nullable();
             $table->timestamps();
 
             $table->unique(['user_id', 'started_at']);
@@ -29,6 +30,7 @@ return new class extends Migration
             $table->index('status');
             $table->index('started_at');
             $table->index('charged_at');
+            $table->index('cancel_date');
         });
     }
 

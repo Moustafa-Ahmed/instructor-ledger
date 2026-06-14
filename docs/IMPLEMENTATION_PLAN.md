@@ -171,27 +171,37 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 
 ---
 
-## Phase 4 — Refund subscription service + command ⬜ TODO
+## Phase 4 — Refund subscription service + command ✅ DONE
 
 ### `app/Services/Subscriptions/RefundSubscriptionService.php`
 
-- `refund(int $subscriptionId, ?CarbonInterface $cancelDate = null): Refund`
-- `cancelDate` defaults to `today()` if null
+- `refund(int $subscriptionId, ?CarbonImmutable $cancelDate = null): Refund`
+- `cancelDate` defaults to `now()` if null
+- Validate: `cancelDate ∈ [startedAt, endsAt)` — half-open period. The subscription's `endsAt` is the first day of the next month, so a cancel date equal to `endsAt` is rejected.
+- Load the `subscription_payment` `LedgerEntry` row via `firstOrFail`. The refund ledger row links back to it via `subscription_entry_id`.
+- Precheck: if a `Refund` row already exists for this subscription (single refund per subscription), return it. Idempotent re-run.
+- **Partial refund math**: `daysInMonth = $startedAt->daysInMonth` (Carbon's accessor — handles 28/30/31 correctly), `daysUsed = $cancelDate->day` (the cancel day is treated as "used"), `daysRemaining = max(0, daysInMonth - daysUsed)`, `refundAmount = intdiv(chargedAmount × daysRemaining, daysInMonth)`. The cancel-day-as-used convention is simpler and matches common subscription billing practice.
+- **Skip the provider call when `refundAmount == 0`** (cancel on the last day of the period). The refund row is still written and the subscription is marked `refunded`, but no money moves at the provider.
+- **Provider call happens outside the service's transaction** (the outbox-pattern-lite — see `ChargeSubscriptionService` for the full rationale). The provider's `mock_payment_operations` row survives a timeout; the retry finds it by `idempotency_key = "refund:subscription:{id}"`.
 - `DB::transaction()`:
-  - `lockForUpdate()` on the subscription row
-  - Validate: subscription exists, `status=active`, `cancel_date ∈ [started_at, ends_at]`
-  - If a `subscription_refund` `LedgerEntry` already exists for this subscription (the `unique(subscription_entry_id)` index catches it) → return the existing `Refund` (idempotent re-run)
-  - Compute partial refund by day-count:
-    - `days_remaining = $subscription->ends_at->diffInDays($cancelDate)` — calendar-day diff using the `Carbon` `diffInDays` semantics
-    - `days_in_month = $subscription->ends_at->day` (last day of the month)
-    - `refund_amount = intdiv(charged_amount × days_remaining, days_in_month)` — integer floor; round-half-up if you want, but floor is safer for the platform
-  - Call `MockPaymentProvider::refundMoney("refund:subscription:{id}", $refund_amount, $subscription->currency)`
-  - On `succeeded`:
-    - Insert `Refund` row with `status=completed`, `provider_refund_reference`, `cancel_date`
-    - Insert `LedgerEntry` row of `type=subscription_refund` with `subscription_entry_id` → original `subscription_payment` row, `amount_cents = -refund_amount`, `idempotency_key = "refund:subscription:{id}"`
-    - Update `subscription.status = refunded`
-  - On `failed`: throw
-- Idempotent re-run returns the existing `Refund`
+  - Insert `Refund` row with `status=completed`, `provider_refund_reference="re:subscription:{id}"`, `cancel_date` (the new `cancel_date` column on `refunds`).
+  - Insert `LedgerEntry` of `type=subscription_refund`, `amount_cents = -refundAmount`, `idempotency_key = "refund:subscription:{id}:ledger"`, `subscription_entry_id` → the original `subscription_payment` row. Skipped if `refundAmount == 0` (nothing to record).
+  - Update `subscription.status = refunded`.
+- Catch-and-refetch on `QueryException` for unique-violation races (the `refunds.subscription_id` unique, which Laravel adds implicitly for the single-column `provider_refund_reference`).
+- The `MockPaymentProvider` was extended with a `refundMoney()` method and a `TYPE_REFUND = 'refund'` constant. Same idempotency pattern as `chargeMoney` / `sendMoney`.
+
+### `app/Console/Commands/RefundSubscriptionCommand.php`
+
+- Signature: `ledger:refund-subscription {subscription_id} {--on=YYYY-MM-DD}`.
+- `cancel_date` defaults to `now()` if `--on` omitted.
+- Validates date format (`YYYY-MM-DD`). Exit code 2 (INVALID) on bad date.
+- Catches `ModelNotFoundException` for missing subscription, `MockPaymentProviderFailedException` for declined, `MockPaymentProviderTimeoutException` for transient provider failure (exit 75).
+- Calls the service, prints the refund id + amount + cancel date.
+
+### Tests
+
+- `tests/Unit/Services/Subscriptions/RefundSubscriptionServiceTest.php` — 8 vectors: partial refund proration, full-day-1 cancellation (largest refund), zero-day-30 cancellation (no money moves, refund row still written), idempotent re-run, provider-failed writes no rows, cancel before period throws, cancel after period throws, missing subscription throws.
+- `tests/Feature/Console/RefundSubscriptionCommandTest.php` — 3 vectors: successful invocation, invalid date format, unknown subscription id.
 
 ### `app/Console/Commands/RefundSubscriptionCommand.php`
 
