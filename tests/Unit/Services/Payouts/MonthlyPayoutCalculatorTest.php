@@ -11,26 +11,33 @@ use App\Models\User;
 use App\Services\Payouts\MonthlyPayoutCalculator;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class, RefreshDatabase::class);
+uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function () {
     config()->set('ledger.platform_cut_bps', 3000);
 });
 
-/**
- * @return LedgerEntry
- */
 function charge(int $userId, int $planId, int $year, int $month, int $amountCents, string $type = 'subscription_payment'): LedgerEntry
 {
-    $subscription = Subscription::factory()->create([
-        'user_id' => $userId,
-        'plan_id' => $planId,
-        'started_at' => CarbonImmutable::create($year, $month, 1)->startOfMonth(),
-        'ends_at' => CarbonImmutable::create($year, $month, 1)->startOfMonth()->addMonth(),
-        'status' => $type === 'subscription_refund' ? SubscriptionStatus::Refunded : SubscriptionStatus::Active,
-        'charged_amount_cents' => abs($amountCents),
-    ]);
+    $startedAt = CarbonImmutable::create($year, $month, 1)->startOfMonth();
+
+    if ($type === 'subscription_refund') {
+        $subscription = Subscription::query()
+            ->where('user_id', $userId)
+            ->where('started_at', $startedAt)
+            ->firstOrFail();
+    } else {
+        $subscription = Subscription::factory()->create([
+            'user_id' => $userId,
+            'plan_id' => $planId,
+            'started_at' => $startedAt,
+            'ends_at' => $startedAt->addMonth(),
+            'status' => SubscriptionStatus::Active,
+            'charged_amount_cents' => abs($amountCents),
+        ]);
+    }
 
     return LedgerEntry::factory()->create([
         'subscription_id' => $subscription->id,

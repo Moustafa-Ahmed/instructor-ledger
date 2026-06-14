@@ -68,4 +68,20 @@ return [
         'refund' => 'refund:',
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Charge retry policy
+    |--------------------------------------------------------------------------
+    |
+    | Applied to ChargeSubscriptionJob. The values live on the job class
+    | itself; this block exists for documentation and env-override.
+    |
+    |   tries   — total attempts before the job's failed() hook fires.
+    |   backoff — seconds to wait between attempts.
+    |
+    */
+
+    'charge_max_attempts' => env('LEDGER_CHARGE_MAX_ATTEMPTS', 5),
+    'charge_backoff_seconds' => [1, 2, 4, 8, 16],
+
 ];

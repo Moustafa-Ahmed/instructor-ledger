@@ -24,6 +24,7 @@ return new class extends Migration
             $table->timestamp('charged_at')->nullable();
             $table->timestamps();
 
+            $table->unique(['user_id', 'started_at']);
             $table->index(['user_id', 'status']);
             $table->index('status');
             $table->index('started_at');

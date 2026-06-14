@@ -133,45 +133,41 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 
 ---
 
-## Phase 3 — Charge subscription service + command ⬜ TODO
+## Phase 3 — Charge subscription service + job + command ✅ DONE
 
 ### `app/Services/Subscriptions/ChargeSubscriptionService.php`
 
 - `charge(int $studentId, int $planId, CarbonInterface $date): Subscription`
 - Returns the new (or pre-existing, on idempotent re-run) `Subscription`
-- `DB::transaction()`:
-  - `lockForUpdate()` on the `User` row to serialize concurrent charges for the same student
-  - If a `Subscription` already exists for `(user_id, period_year, period_month)` → return it (idempotent re-run with the same date)
-  - Build period bounds: `started_at = first day of $date at 00:00`, `ends_at = first day of next month at 00:00`
-  - Generate `provider_charge_reference = 'ch_'.Str::random(24)`; the **idempotency key sent to the provider** is `charge:user:{student_id}:{year}-{month}` (this is what stops double-charges at the provider)
-  - `MockPaymentProvider::chargeMoney($idempotencyKey, $plan->price_cents, $plan->currency)`
-  - On `succeeded`: insert `Subscription` row, insert `LedgerEntry` row of `type=subscription_payment` with `amount_cents = +plan->price_cents`, `idempotency_key = "payment:subscription:{subscription_id}"`
-  - On `failed` or `timeout`: throw `PaymentFailedException`; transaction rolls back
-- No queue, no dispatch — pure unit of work
+- Single attempt, throws on provider failure. Retry is the job's job.
+- Pre-check outside the transaction: if a `Subscription` already exists for `(user_id, started_at)` → return it.
+- Inside `DB::transaction()`:
+  - `lockForUpdate()` on the `(user_id, started_at)` pair — double-checked-locking to handle the race between precheck and insert.
+  - `provider_charge_reference = "ch:{studentId}:{year}-{month}"` — deterministic, not random. The unique index on `provider_charge_reference` is the backstop.
+  - `idempotency_key` sent to the provider is `"charge:" . $provider_charge_reference`.
+  - `MockPaymentProvider::chargeMoney(...)`. On `failed` or `timeout_after_success`, the provider throws; the transaction rolls back. No rows written.
+  - On `succeeded`: insert `Subscription` row, insert `LedgerEntry` of `type=subscription_payment` with `idempotency_key = "payment:subscription:{id}"`.
+- Catches `QueryException` for unique-violation races; returns the existing row.
+
+### `app/Jobs/ChargeSubscriptionJob.php`
+
+- `public int $tries = 5;` and `public array $backoff = [1, 2, 4, 8, 16];` — Laravel-native retry policy.
+- `public int $timeout = 60;` — provider call + DB writes must complete in 60s.
+- Constructor: `(int $studentId, int $planId, CarbonImmutable $date)`.
+- `handle(ChargeSubscriptionService $service)`: one-liner, `$service->charge(...)`.
+- The retry recovers from `MockPaymentProviderTimeoutException` implicitly: the provider's `mock_payment_operations` row was written on the first attempt (its inner transaction committed before the throw). On the second attempt, the provider's `createOrReturnOperation` finds the existing row by idempotency_key and returns the prior `succeeded` result. The service then inserts the `Subscription` and `LedgerEntry` rows. No recovery code needed in the service.
 
 ### `app/Console/Commands/ChargeSubscriptionCommand.php`
 
-- Signature: `ledger:charge-subscription {student_id} {plan_id} {date}`
-- Validates args: id types, date format `YYYY-MM-DD`, user exists with `role=student`, plan exists
-- Calls the service
-- Prints the created (or re-used) `Subscription` id
-- Exit 0 on success or idempotent re-run; non-zero on provider failure with the error message
+- Signature: `ledger:charge-subscription {student_id} {plan_id} {date}`.
+- Validates: date parses as `YYYY-MM-DD`, student exists with `role=student`, plan exists. Exit code 2 (INVALID) on bad date, 1 (FAILURE) on missing student/plan.
+- `ChargeSubscriptionJob::dispatch(...)`. Prints "Charge job dispatched. It will be retried up to 5 times with exponential backoff on provider timeout."
 
 ### Tests
 
-- `tests/Unit/Services/Subscriptions/ChargeSubscriptionServiceTest.php`
-  - Successful charge → 1 subscription + 1 ledger row
-  - Provider `failed` outcome → 0 rows written, exception thrown
-  - Provider `timeout` outcome → 0 rows written, exception thrown
-  - Re-run with same args → returns the existing subscription, no new provider call
-  - Re-run with different `date` in the same month → returns the same subscription (idempotent by month, not by exact date)
-  - Re-run with `date` in a different month → new subscription, new provider call
-- `tests/Feature/Console/ChargeSubscriptionCommandTest.php`
-  - Successful invocation via `Artisan::call` → exit 0, expected output
-  - Invalid date format → validation error, exit non-zero
-  - Unknown student id → friendly error
-  - Unknown plan id → friendly error
-  - Non-student user (instructor role) → role-check error
+- `tests/Unit/Services/Subscriptions/ChargeSubscriptionServiceTest.php` — 12 vectors: success, provider `failed` and `timeout` write no rows, idempotent re-run in same month, different month = new row, race recovery on unique violation, role check, missing student/plan, deterministic `provider_charge_reference` and ledger `idempotency_key` patterns.
+- `tests/Feature/Jobs/ChargeSubscriptionJobTest.php` — 6 vectors: `$tries` and `$backoff` declarations, `Bus::dispatch` shape, success on first attempt, recovery on retry after timeout (provider's idempotency_key handles it), `failed` outcome exhausts, persistent timeout exhausts. Each test rebinds a fresh `MockPaymentProvider` instance to avoid singleton state leakage between tests.
+- `tests/Feature/Console/ChargeSubscriptionCommandTest.php` — 3 vectors: dispatch shape, invalid date format, missing student id.
 
 ---
 
