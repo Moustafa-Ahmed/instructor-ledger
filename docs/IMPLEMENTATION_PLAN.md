@@ -10,27 +10,33 @@ The plan reflects the code as of the latest round of design changes. Older desig
 
 Trade-offs made during design. Each is the chosen path; the rejected alternative is in italics.
 
-- **Unified 4-type `ledger_entries`** (vs. *instructor-centric ledger + separate `payouts` + separate `platform_revenue` tables*). One row, one truth, one SUM() to answer "how much has the student paid / the platform kept / each instructor earned." *Rejected: separate tables force UNIONs and lose the single-source-of-truth for cross-domain questions.*
+- **Unified 4-type `ledger_entries`** (vs. _instructor-centric ledger + separate `payouts` + separate `platform_revenue` tables_). One row, one truth, one SUM() to answer "how much has the student paid / the platform kept / each instructor earned." _Rejected: separate tables force UNIONs and lose the single-source-of-truth for cross-domain questions._
 
-- **Calendar-month plans** (vs. *arbitrary-day subscription terms*). "Monthly / 3-month / annual" is implemented as N sequential `Subscription` rows aligned to month boundaries, not as a single subscription with a long term. Simplifies the per-month payout cycle, the refund proration, and the test invariants.
+- **Calendar-month plans** (vs. _arbitrary-day subscription terms_). "Monthly / 3-month / annual" is implemented as N sequential `Subscription` rows aligned to month boundaries, not as a single subscription with a long term. Simplifies the per-month payout cycle, the refund proration, and the test invariants.
 
-- **Monthly payout cycle, not per-charge allocation** (vs. *write per-instructor accrual rows at charge time*). The platform's cut and the per-instructor payouts are written once at the end of each month. Allocations are derived, not stored. Real-time balance visibility is sacrificed for a much cleaner monthly invariant and a much smaller hot table.
+- **Monthly payout cycle, not per-charge allocation** (vs. _write per-instructor accrual rows at charge time_). The platform's cut and the per-instructor payouts are written once at the end of each month. Allocations are derived, not stored. Real-time balance visibility is sacrificed for a much cleaner monthly invariant and a much smaller hot table.
 
-- **Partial refunds as a negative `subscription_payment` row** (vs. *per-instructor mirror reversal rows with `source_allocation_id` chains*). A refund reduces the instructor pool naturally at the next monthly payout because the refund row is already negative in the same SUM. No clawback row, no per-instructor distribution math at refund time.
+- **Partial refunds as a negative `subscription_payment` row** (vs. _per-instructor mirror reversal rows with `source_allocation_id` chains_). A refund reduces the instructor pool naturally at the next monthly payout because the refund row is already negative in the same SUM. No clawback row, no per-instructor distribution math at refund time.
 
-- **`period` derived from `started_at`** (vs. *stored `period_year` / `period_month` columns* on `subscriptions` and `ledger_entries*`). The columns were pure denormalization. Month queries are `where started_at >= first_of_month AND started_at < first_of_next_month` against the `started_at` index, which is fast and avoids insert-time copy bugs.
+- **`period` derived from `started_at`** (vs. _stored `period_year` / `period_month` columns_ on `subscriptions` and `ledger_entries*`). The columns were pure denormalization. Month queries are `where started_at >= first_of_month AND started_at < first_of_next_month` against the `started_at` index, which is fast and avoids insert-time copy bugs.
 
-- **Instructors merged into `users` with a `role` column** (vs. *separate `instructors` table*). Saves a join. An instructor is just a user with a different role. The `course_instructor` and `ledger_entries` FKs all point to `users`.
+- **Instructors merged into `users` with a `role` column** (vs. _separate `instructors` table_). Saves a join. An instructor is just a user with a different role. The `course_instructor` and `ledger_entries` FKs all point to `users`.
 
-- **No `platform_cut_bps` snapshot on subscriptions** (vs. *per-row snapshot of the config at charge time*). The config is the single source of truth; every period's cut is computed from `config('ledger.platform_cut_bps')`. If the config ever needs to change mid-year, historical months are not recomputed — the close service's idempotency_key design is what protects them.
+- **No `platform_cut_bps` snapshot on subscriptions** (vs. _per-row snapshot of the config at charge time_). The config is the single source of truth; every period's cut is computed from `config('ledger.platform_cut_bps')`. If the config ever needs to change mid-year, historical months are not recomputed — the close service's idempotency_key design is what protects them.
 
-- **No `courses.is_active` flag** (vs. *a soft-delete-style active/inactive flag*). Every attached instructor is eligible; the schema doesn't carry course lifecycle. If a course is being retired, the attachment is removed (or, in production, would be soft-deletable via a `course_instructor.ended_at`).
+- **No `courses.is_active` flag** (vs. _a soft-delete-style active/inactive flag_). Every attached instructor is eligible; the schema doesn't carry course lifecycle. If a course is being retired, the attachment is removed (or, in production, would be soft-deletable via a `course_instructor.ended_at`).
 
-- **`payout_attempts` info folded into `meta` JSON on `instructor_payout` rows** (vs. *separate `payout_attempts` table*). Attempt history is a diagnostic, not a hot query. Provider-side truth lives in `mock_payment_operations`; the `meta` JSON is the row-local summary. If per-attempt analytics become important, split it out.
+- **`payout_attempts` info folded into `meta` JSON on `instructor_payout` rows** (vs. _separate `payout_attempts` table_). Attempt history is a diagnostic, not a hot query. Provider-side truth lives in `mock_payment_operations`; the `meta` JSON is the row-local summary. If per-attempt analytics become important, split it out.
 
-- **Command-driven money flow** (vs. *HTTP API / web UI*). The challenge brief says "you do not need a full application." Artisan commands (`ledger:charge-subscription`, `ledger:refund-subscription`, `ledger:run-payouts`) are the user interface. No controllers, no form requests, no student-facing UI. The only Filament screen is the read-only ops view.
+- **Command-driven money flow** (vs. _HTTP API / web UI_). The challenge brief says "you do not need a full application." Artisan commands (`ledger:charge-subscription`, `ledger:refund-subscription`, `ledger:run-payouts`) are the user interface. No controllers, no form requests, no student-facing UI. The only Filament screen is the read-only ops view.
 
-- **Service layer + thin jobs** (vs. *fat jobs with business logic inline*). Each side effect (charge, refund, close month, pay instructor, reconcile) has a service class that owns the transaction, the provider call, and the DB writes. Jobs are thin orchestrators: load the row, dispatch to the service, write the result, schedule the next step on a flag. This makes the services directly testable without queuing, and keeps the jobs readable as a single paragraph.
+- **Service layer + thin jobs** (vs. _fat jobs with business logic inline_). Each side effect (charge, refund, close month, pay instructor, reconcile) has a service class that owns the transaction, the provider call, and the DB writes. Jobs are thin orchestrators: load the row, dispatch to the service, write the result, schedule the next step on a flag. This makes the services directly testable without queuing, and keeps the jobs readable as a single paragraph.
+
+- **`cancel_date` lives on `subscriptions`, not on `refunds`** (vs. _refund-row placement_). The cancel date is the _input_ to the proration math, not a property of the provider-workflow row. The `Refund` model docblock already says "no financial logic of its own" — storing the cancel date there contradicted that boundary. With it on the subscription, the state transition (`status=refunded`) and the transition timestamp (`cancel_date`) commit atomically in the same `update()` call.
+
+- **Phase 5 idempotency: precheck + unique-violation catch, no row locks** (vs. _`lockForUpdate()` on subscriptions + `sharedLock` on the join_). The two SQL hints are mutually exclusive on the same query, and the unique index on `idempotency_key` already makes the race harmless. Two layers (fast precheck + catch-and-refetch on `QueryException` 23000) covers the common case and the rare race. No row locks means a re-run or a concurrent close attempt can't block readers.
+
+- **Empty / zero-net month → no rows written** (vs. _sentinel `platform_cut:YYYY-MM` row with `amount_cents = 0`_). The unique index is a gate, not a marker. Once a zero-amount row is written, a late refund that arrives later cannot be reflected in that month (the unique key blocks the non-zero rewrite). With nothing written, the month stays in the "not closed" state and a future close attempt after a late refund can produce real rows.
 
 ---
 
@@ -142,11 +148,11 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 - Single attempt, throws on provider failure. Retry is the job's job.
 - Pre-check outside the transaction: if a `Subscription` already exists for `(user_id, started_at)` → return it.
 - Inside `DB::transaction()`:
-  - `lockForUpdate()` on the `(user_id, started_at)` pair — double-checked-locking to handle the race between precheck and insert.
-  - `provider_charge_reference = "ch:{studentId}:{year}-{month}"` — deterministic, not random. The unique index on `provider_charge_reference` is the backstop.
-  - `idempotency_key` sent to the provider is `"charge:" . $provider_charge_reference`.
-  - `MockPaymentProvider::chargeMoney(...)`. On `failed` or `timeout_after_success`, the provider throws; the transaction rolls back. No rows written.
-  - On `succeeded`: insert `Subscription` row, insert `LedgerEntry` of `type=subscription_payment` with `idempotency_key = "payment:subscription:{id}"`.
+    - `lockForUpdate()` on the `(user_id, started_at)` pair — double-checked-locking to handle the race between precheck and insert.
+    - `provider_charge_reference = "ch:{studentId}:{year}-{month}"` — deterministic, not random. The unique index on `provider_charge_reference` is the backstop.
+    - `idempotency_key` sent to the provider is `"charge:" . $provider_charge_reference`.
+    - `MockPaymentProvider::chargeMoney(...)`. On `failed` or `timeout_after_success`, the provider throws; the transaction rolls back. No rows written.
+    - On `succeeded`: insert `Subscription` row, insert `LedgerEntry` of `type=subscription_payment` with `idempotency_key = "payment:subscription:{id}"`.
 - Catches `QueryException` for unique-violation races; returns the existing row.
 
 ### `app/Jobs/ChargeSubscriptionJob.php`
@@ -184,9 +190,12 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 - **Skip the provider call when `refundAmount == 0`** (cancel on the last day of the period). The refund row is still written and the subscription is marked `refunded`, but no money moves at the provider.
 - **Provider call happens outside the service's transaction** (the outbox-pattern-lite — see `ChargeSubscriptionService` for the full rationale). The provider's `mock_payment_operations` row survives a timeout; the retry finds it by `idempotency_key = "refund:subscription:{id}"`.
 - `DB::transaction()`:
-  - Insert `Refund` row with `status=completed`, `provider_refund_reference="re:subscription:{id}"`, `cancel_date` (the new `cancel_date` column on `refunds`).
-  - Insert `LedgerEntry` of `type=subscription_refund`, `amount_cents = -refundAmount`, `idempotency_key = "refund:subscription:{id}:ledger"`, `subscription_entry_id` → the original `subscription_payment` row. Skipped if `refundAmount == 0` (nothing to record).
-  - Update `subscription.status = refunded`.
+    - Insert `Refund` row with `status=completed`, `provider_refund_reference="re:subscription:{id}"` (no `cancel_date` — that field was moved to `subscriptions`; see note below).
+    - Insert `LedgerEntry` of `type=subscription_refund`, `amount_cents = -refundAmount`, `idempotency_key = "refund:subscription:{id}:ledger"`, `subscription_entry_id` → the original `subscription_payment` row. Skipped if `refundAmount == 0` (nothing to record).
+    - Update `subscription.status = refunded` and `subscription.cancel_date = $cancelDate` in the same `update()` call — atomic state transition. The two fields commit together; a `Refunded` subscription can never have a `null` `cancel_date`.
+
+> **Note — `cancel_date` moved from `refunds` to `subscriptions`.** The cancel date is the _input_ to the proration math, not a property of the provider-workflow row. The `Refund` model docblock says it holds "no financial logic of its own" — storing the cancel date there contradicted that boundary. The `subscriptions.cancel_date` is the state-transition timestamp (the moment the subscription flipped from Active to Refunded); the `refunds` row tracks only whether the provider acknowledged the money movement. Migration: added `cancel_date` (nullable, indexed) to `subscriptions`, removed the column from `refunds`. The `Subscription` model has `cancel_date` in `$fillable` and cast to `date`. The `RefundSubscriptionCommand` re-fetches the subscription to print the cancel date.
+
 - Catch-and-refetch on `QueryException` for unique-violation races (the `refunds.subscription_id` unique, which Laravel adds implicitly for the single-column `provider_refund_reference`).
 - The `MockPaymentProvider` was extended with a `refundMoney()` method and a `TYPE_REFUND = 'refund'` constant. Same idempotency pattern as `chargeMoney` / `sendMoney`.
 
@@ -200,7 +209,7 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 
 ### Tests
 
-- `tests/Unit/Services/Subscriptions/RefundSubscriptionServiceTest.php` — 8 vectors: partial refund proration, full-day-1 cancellation (largest refund), zero-day-30 cancellation (no money moves, refund row still written), idempotent re-run, provider-failed writes no rows, cancel before period throws, cancel after period throws, missing subscription throws.
+- `tests/Unit/Services/Subscriptions/RefundSubscriptionServiceTest.php` — 9 vectors: partial refund proration, full-day-1 cancellation (largest refund), zero-day-30 cancellation (no money moves, refund row still written), idempotent re-run, provider-failed writes no rows, cancel before period throws, cancel after period throws, missing subscription throws, **cancel_date lives on the subscription (not on the refund row) — guards against regression**.
 - `tests/Feature/Console/RefundSubscriptionCommandTest.php` — 3 vectors: successful invocation, invalid date format, unknown subscription id.
 
 ### `app/Console/Commands/RefundSubscriptionCommand.php`
@@ -215,70 +224,90 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 ### Tests
 
 - `tests/Unit/Services/Subscriptions/RefundSubscriptionServiceTest.php`
-  - Cancel on day 1 of a 30-day month → refund = 29/30 × charged (close to full refund, off-by-one acceptable with a clear comment)
-  - Cancel on day 30 of a 30-day month → refund = 0
-  - Cancel on the same day as `started_at` → refund = full amount
-  - Already-refunded subscription → returns the existing Refund, no new provider call
-  - Provider `failed` → no rows, exception thrown
-  - `cancel_date` outside the period → validation error
-  - Ledger invariant: `sum(amount_cents) where subscription_id = X AND type IN ('subscription_payment', 'subscription_refund')` equals the net paid (negative of the refund)
+    - Cancel on day 1 of a 30-day month → refund = 29/30 × charged (close to full refund, off-by-one acceptable with a clear comment)
+    - Cancel on day 30 of a 30-day month → refund = 0
+    - Cancel on the same day as `started_at` → refund = full amount
+    - Already-refunded subscription → returns the existing Refund, no new provider call
+    - Provider `failed` → no rows, exception thrown
+    - `cancel_date` outside the period → validation error
+    - Ledger invariant: `sum(amount_cents) where subscription_id = X AND type IN ('subscription_payment', 'subscription_refund')` equals the net paid (negative of the refund)
 - `tests/Feature/Console/RefundSubscriptionCommandTest.php`
-  - Successful invocation via `Artisan::call` → exit 0, expected output
-  - Re-run → "already refunded" message
-  - Invalid date format → validation error
-  - Unknown subscription id → friendly error
+    - Successful invocation via `Artisan::call` → exit 0, expected output
+    - Re-run → "already refunded" message
+    - Invalid date format → validation error
+    - Unknown subscription id → friendly error
 
 ---
 
-## Phase 5 — Close monthly payout service + command + scheduler ⬜ TODO
+## Phase 5 — Close monthly payout service + command + scheduler ✅ DONE
+
+Four design decisions were settled before this phase was built. Each is in the code AND in this doc; the rationale lives here.
+
+> **1. No application-level row locks. Idempotency gate is the unique `idempotency_key` index.**
+> _Rejected:_ the original plan called for `lockForUpdate()` on subscription rows in the period + a `sharedLock` on the join. SQL locks on the same query are mutually exclusive, and the unique index already makes the race harmless — the loser catches a `QueryException` (SQLSTATE 23000) and re-fetches the winning row. Two layers (fast precheck + unique-violation catch), zero row locks. Same shape as `ChargeSubscriptionService`'s race recovery.
+
+> **2. Empty / zero-net months write nothing.**
+> _Rejected:_ a sentinel `platform_cut:YYYY-MM` row with `amount_cents = 0`. The unique index is a _gate_, not a marker — once a zero-amount row is written for a month, a late refund that arrives later cannot be reflected in that month (the unique key blocks a non-zero re-write). With no row written, an empty month stays in the "not closed" state and a future close attempt after a late refund can still produce real rows. The per-month invariant `SUM = 0` holds trivially when no rows exist.
+
+> **3. Every `instructor_payout` row is initialised with `meta = ['status' => 'pending']`.**
+> _Rejected:_ leaving `meta` null and letting Phase 6 set it on first contact. With null `meta`, every Phase 6 reader has to `?? 'pending'` — a default that lives in code instead of in data. With `meta.status = 'pending'` on insert, the row is self-describing from the moment it's created and the Phase 6 idempotency check (`in_array($meta['status'], ['sent', 'failed'], true)`) works without a null guard. Four states: `pending → reconciling → sent`, with `failed` as a terminal alternative. `pending` is the only state written by Phase 5.
+
+> **4. Idempotency keys use the canonical `YYYY-MM` form, zero-padded.**
+> _Rejected:_ PHP's `"platform_cut:{$year}-{$month}"` string interpolation — for `month=6` it produces `platform_cut:2026-6`, for `month=12` it produces `platform_cut:2026-12`. Different months, different shapes, breaks the unique index contract. The service uses `sprintf('%04d-%02d', $year, $month)` everywhere a key is built. The `LedgerEntryFactory` was updated to match.
 
 ### `app/Services/Payouts/CloseMonthlyPayoutService.php`
 
 - `close(int $year, int $month): PayoutDraft`
-- `DB::transaction()`:
-  - `lockForUpdate()` on all `Subscription` rows in the period (via `scopeForPeriod` + a `sharedLock` on the join to `ledger_entries`)
-  - Check `LedgerEntry::where('idempotency_key', "platform_cut:{year}-{month}")->exists()` — if yes, the month is already closed; return the existing draft (idempotent re-run)
-  - Call `MonthlyPayoutCalculator::calculate($year, $month)` to get the draft
-  - Insert `LedgerEntry` row of `type=platform_cut`: `user_id=null, subscription_id=null, amount_cents=-platform_cut_cents, currency=USD, idempotency_key="platform_cut:{year}-{month}"`
-  - Insert one `LedgerEntry` row of `type=instructor_payout` per instructor: `user_id=instructor, subscription_id=null, amount_cents=-share, currency=USD, idempotency_key="payout:{year}-{month}:user:{user_id}"`
-  - Capture the row ids of the created `instructor_payout` rows into the returned draft
-- **Does not dispatch jobs.** The command dispatches them after the transaction commits.
-- Idempotent re-run: returns the existing draft (constructed from already-existing rows) without inserting
+- `DB::transaction()` (no row locks; the precheck + unique-violation catch handle the race):
+    - Precheck: `LedgerEntry::where('idempotency_key', "platform_cut:YYYY-MM")->exists()`. If true, the month is already closed — rebuild the draft from the existing rows (including their ids) and return it.
+    - Compute the draft via `MonthlyPayoutCalculator::calculate($year, $month)`.
+    - If `$draft->isEmpty()` (`platform_cut_cents === 0` AND `instructorPayouts === []`), return it as-is. No rows written.
+    - Otherwise: insert one `LedgerEntry` row of `type=platform_cut` (`user_id=null, subscription_id=null, amount_cents=-platform_cut_cents, currency=USD, idempotency_key="platform_cut:YYYY-MM", meta=null`) and one `LedgerEntry` row of `type=instructor_payout` per instructor (`user_id=instructor, subscription_id=null, amount_cents=-share, currency=USD, idempotency_key="payout:YYYY-MM:user:{user_id}", meta=['status'=>'pending']`).
+    - The returned draft is the input draft + the row ids of the inserted rows.
+- `PayoutDraft::isEmpty()` and `PayoutDraft::withLedgerEntryIds()` are the two helpers added in this phase.
+- `PayoutDraft::loadExisting()` rebuilds a draft from rows already on disk (used by the precheck and the race-recovery catch). This is what makes the re-run case return the _same_ row ids and therefore dispatch the _same_ job ids.
 
 ### `app/Console/Commands/RunMonthlyPayoutsCommand.php`
 
-- Signature: `ledger:run-payouts {--year=} {--month=}`. Defaults to previous calendar month.
-- Validates year/month are valid integers
-- Calls `CloseMonthlyPayoutService::close()`
-- After the transaction commits: dispatches one `PayInstructorJob` per `instructor_payout` row id
-- Prints "month N closed: 1 platform_cut + K instructor_payouts dispatched" or "month N already closed, no-op"
-- Exit 0 always
+- Signature: `ledger:run-payouts {--year=} {--month=}`. Defaults to previous calendar month (`CarbonImmutable::now()->subMonthNoOverflow()`).
+- If either flag is passed, both are required. Invalid month (not 1–12) → exit 2 (INVALID).
+- Calls `CloseMonthlyPayoutService::close()`. Empty month → prints "Month YYYY-MM had no activity. Nothing to close." and exits 0.
+- Non-empty month → dispatches one `App\Jobs\PayInstructorJob($ledgerEntryId)` per `instructor_payout` row id. Prints "Month YYYY-MM closed: 1 platform_cut (X cents) + K instructor_payout(s) → K job(s) dispatched." Exit 0.
+- **Phase 6 stub:** the `PayInstructorJob` class exists as a minimal `ShouldQueue + ShouldBeUnique` with `uniqueId() = "pay-instructor:{ledgerEntryId}"`. The full `handle()` (calling `PayInstructorService`) is added in Phase 6.
 
 ### Scheduler entry in `routes/console.php`
 
 ```php
-use Illuminate\Support\Facades\Schedule;
 Schedule::command('ledger:run-payouts')
     ->monthlyOn(1, '00:00')
     ->withoutOverlapping()
     ->onOneServer();
 ```
 
-The `withoutOverlapping()` prevents two cron invocations from racing on the same month. `onOneServer()` for production deployments with multiple workers.
+`withoutOverlapping()` is belt-and-braces: even though the close service is idempotent on a re-run, it avoids the wasted DB work of a second close attempt within the same minute. `onOneServer()` is for production deployments with multiple workers; the dev single-worker setup is unaffected.
+
+### `Subscription::scopeForPeriod` — small cleanup
+
+Switched from `Carbon::create()` (mutable) to `CarbonImmutable::create()` for consistency with the rest of the codebase (the refund service and the calculator both use `CarbonImmutable`). The `->copy()->addMonth()` defensive copy is no longer needed; `addMonth()` on an immutable returns a new instance.
 
 ### Tests
 
-- `tests/Unit/Services/Payouts/CloseMonthlyPayoutServiceTest.php`
-  - Successful close → 1 platform_cut + N instructor_payout rows, sums match the calculator's output
-  - **Re-run with same month → no new rows** (idempotent — the unique on `idempotency_key` enforces it)
-  - Empty month (no payments) → no rows written (or 1 platform_cut with amount=0 + 0 instructor_payouts; decide and document)
-  - Idempotency keys follow the exact pattern: `platform_cut:2026-06`, `payout:2026-06:user:{id}`
-- `tests/Feature/Console/RunMonthlyPayoutsCommandTest.php`
-  - Successful run with `Bus::fake()` → 1 platform_cut row + K jobs dispatched
-  - Re-run → 0 new rows, 0 new jobs
-  - `--year=2026 --month=6` flag works
-  - Default args (no flags, ran in July) → closes June
-  - Refunds in the period reduce the pool
+- `tests/Unit/Services/Payouts/CloseMonthlyPayoutServiceTest.php` — 8 vectors:
+    - Successful close → 1 `platform_cut` + 1 `instructor_payout` per instructor, sums match the calculator's output
+    - Re-run of the same month is a no-op (no new rows; same row ids returned)
+    - Empty month (no payments) → no rows written
+    - Month whose only activity is a full refund (net = 0) → no rows written
+    - **Late refund can still re-close a previously-empty month** — the original close wrote nothing; a payment + refund that arrives later produces real rows on a re-run. This is the empty-month policy under test.
+    - Idempotency keys follow the literal `platform_cut:2026-06` and `payout:2026-06:user:{id}` form (zero-padded; asserted against the literal, not interpolated, string — the test file is the contract)
+    - A refund reduces the pool: net 1000 with a 400 refund → cut 180, pool 420
+    - Recovers from a unique-violation race: a row pre-seeded with `platform_cut:2026-06` (as if written by a competing process) is honoured — close returns the pre-existing values, no double write
+- `tests/Feature/Console/RunMonthlyPayoutsCommandTest.php` — 6 vectors:
+    - Dispatches one `PayInstructorJob` per instructor on a successful run, asserts the dispatched `ledgerEntryId` matches the on-disk row
+    - Empty month → no jobs dispatched, no rows written
+    - Re-run of the same month → 0 new rows (jobs may dispatch again — that's `PayInstructorJob`'s `ShouldBeUnique` lock in Phase 6 to de-dupe)
+    - Default args in July → closes June
+    - `--month=13` rejected with INVALID
+    - Only one of `--year` / `--month` provided → INVALID
 
 ---
 
@@ -289,25 +318,25 @@ The `withoutOverlapping()` prevents two cron invocations from racing on the same
 - `pay(int $ledgerEntryId): PayResult`
 - `PayResult` is a DTO with `status: 'sent'|'failed'|'reconciling'` and `needsReconciliation: bool`
 - `DB::transaction()`:
-  - Load + `lockForUpdate()` the `instructor_payout` ledger row
-  - If `meta.status` is already terminal (`sent` or `failed`) → return early with the existing status (idempotent re-run)
-  - Call `MockPaymentProvider::sendMoney($idempotencyKey, abs($amount_cents), $currency)`
-  - On `succeeded`: write `meta = {status: 'sent', provider_reference, sent_at: now()}`
-  - On `failed`: write `meta = {status: 'failed', error: $message}` (no retry — this is a permanent failure for the platform)
-  - On `timeout`: write `meta = {status: 'reconciling'}`, return `PayResult(needsReconciliation: true)`
+    - Load + `lockForUpdate()` the `instructor_payout` ledger row
+    - If `meta.status` is already terminal (`sent` or `failed`) → return early with the existing status (idempotent re-run)
+    - Call `MockPaymentProvider::sendMoney($idempotencyKey, abs($amount_cents), $currency)`
+    - On `succeeded`: write `meta = {status: 'sent', provider_reference, sent_at: now()}`
+    - On `failed`: write `meta = {status: 'failed', error: $message}` (no retry — this is a permanent failure for the platform)
+    - On `timeout`: write `meta = {status: 'reconciling'}`, return `PayResult(needsReconciliation: true)`
 
 ### `app/Services/Payouts/ReconcileInstructorPayoutService.php`
 
 - `reconcile(int $ledgerEntryId, int $attempts): void`
 - `markExhausted(int $ledgerEntryId): void` — called by the job's `failed()` hook
 - `DB::transaction()`:
-  - Load + `lockForUpdate()` the row
-  - If `meta.status != 'reconciling'` → return (already settled)
-  - Call `MockPaymentProvider::checkStatusByIdempotencyKey($key)`
-  - `succeeded` → `meta = {status: 'sent', provider_reference, sent_at: now()}`
-  - `failed` → `meta = {status: 'failed'}`
-  - `unknown` → throw `StillReconcilingException` (so the job releases with backoff)
-  - If the job's attempt count is at max (5), call `markExhausted()` instead of throwing
+    - Load + `lockForUpdate()` the row
+    - If `meta.status != 'reconciling'` → return (already settled)
+    - Call `MockPaymentProvider::checkStatusByIdempotencyKey($key)`
+    - `succeeded` → `meta = {status: 'sent', provider_reference, sent_at: now()}`
+    - `failed` → `meta = {status: 'failed'}`
+    - `unknown` → throw `StillReconcilingException` (so the job releases with backoff)
+    - If the job's attempt count is at max (5), call `markExhausted()` instead of throwing
 
 ### `app/Jobs/PayInstructorJob.php`
 
@@ -367,26 +396,26 @@ class ReconcileInstructorPayoutJob implements ShouldQueue
 ### Tests
 
 - `tests/Unit/Services/Payouts/PayInstructorServiceTest.php`
-  - `succeeded` outcome → `meta.status = 'sent'`, `provider_reference` stored
-  - `failed` outcome → `meta.status = 'failed'`, no retry signal
-  - `timeout` outcome → `meta.status = 'reconciling'`, `PayResult::needsReconciliation = true`
-  - Re-run on a `sent` row → returns the existing status, no new provider call
-  - Re-run on a `failed` row → returns the existing status, no new provider call
-  - Re-run on a `reconciling` row → returns `reconciling` (the reconcile job owns that state machine)
+    - `succeeded` outcome → `meta.status = 'sent'`, `provider_reference` stored
+    - `failed` outcome → `meta.status = 'failed'`, no retry signal
+    - `timeout` outcome → `meta.status = 'reconciling'`, `PayResult::needsReconciliation = true`
+    - Re-run on a `sent` row → returns the existing status, no new provider call
+    - Re-run on a `failed` row → returns the existing status, no new provider call
+    - Re-run on a `reconciling` row → returns `reconciling` (the reconcile job owns that state machine)
 - `tests/Unit/Services/Payouts/ReconcileInstructorPayoutServiceTest.php`
-  - First call, status `unknown` → throws `StillReconcilingException`
-  - Subsequent call, status `succeeded` → `meta.status = 'sent'`
-  - Subsequent call, status `failed` → `meta.status = 'failed'`
-  - `markExhausted` writes `meta.status = 'failed', meta.reconciliation_exhausted = true`
-  - Re-run on a `sent` row → no-op
+    - First call, status `unknown` → throws `StillReconcilingException`
+    - Subsequent call, status `succeeded` → `meta.status = 'sent'`
+    - Subsequent call, status `failed` → `meta.status = 'failed'`
+    - `markExhausted` writes `meta.status = 'failed', meta.reconciliation_exhausted = true`
+    - Re-run on a `sent` row → no-op
 - `tests/Feature/Payouts/PayInstructorJobTest.php`
-  - Job handles `succeeded` → meta updated
-  - Job handles `timeout` → dispatch a `ReconcileInstructorPayoutJob`
-  - **Retried job never double-pays** (the `unique` lock + the service's terminal-state short-circuit)
+    - Job handles `succeeded` → meta updated
+    - Job handles `timeout` → dispatch a `ReconcileInstructorPayoutJob`
+    - **Retried job never double-pays** (the `unique` lock + the service's terminal-state short-circuit)
 - `tests/Feature/Payouts/ReconcileInstructorPayoutJobTest.php`
-  - First attempt with `unknown` → job re-queued
-  - Eventually settled to `sent` when provider returns `succeeded` on a later attempt
-  - Eventually exhausted after 5 attempts → `meta.reconciliation_exhausted = true`
+    - First attempt with `unknown` → job re-queued
+    - Eventually settled to `sent` when provider returns `succeeded` on a later attempt
+    - Eventually exhausted after 5 attempts → `meta.reconciliation_exhausted = true`
 
 ---
 
@@ -395,11 +424,11 @@ class ReconcileInstructorPayoutJob implements ShouldQueue
 - `composer require filament/filament:"^3.2" -W`
 - `php artisan filament:install --panels`
 - `app/Filament/Resources/InstructorResource.php` (read-only)
-  - Table columns: `name`, `payout_destination`, **`earned_cents`** (SUM of `type=allocation` allocations, sign-aware), **`paid_cents`** (abs SUM of `type=instructor_payout`), **`outstanding_cents`** (`earned − paid`)
-  - Per-row query against the ledger, no materialization
-  - Negative outstanding → "balance owed back" badge
+    - Table columns: `name`, `payout_destination`, **`earned_cents`** (SUM of `type=allocation` allocations, sign-aware), **`paid_cents`** (abs SUM of `type=instructor_payout`), **`outstanding_cents`** (`earned − paid`)
+    - Per-row query against the ledger, no materialization
+    - Negative outstanding → "balance owed back" badge
 - `app/Filament/Resources/PayoutHistoryRelationManager.php` (read-only)
-  - Per-instructor list of `instructor_payout` ledger rows with `meta.status`, `sent_at`, amount
+    - Per-instructor list of `instructor_payout` ledger rows with `meta.status`, `sent_at`, amount
 - Admin user seeder
 
 ---
@@ -421,25 +450,25 @@ The challenge-mandated scenarios, each in its own file. Use the deterministic ou
 ## Phase 9 — Docs ⬜ TODO
 
 - `README.md` — rewrite from Laravel boilerplate
-  - Project summary (1 paragraph)
-  - Setup: `composer install`, `cp .env.example .env`, `php artisan key:generate`, `php artisan migrate --seed`
-  - Run tests: `vendor/bin/pest`
-  - Run the demo: `ledger:charge-subscription`, `ledger:refund-subscription`, `ledger:run-payouts`
-  - Assumptions: platform cut 30%, monthly settlement, single currency, calendar-month plans, partial refunds
+    - Project summary (1 paragraph)
+    - Setup: `composer install`, `cp .env.example .env`, `php artisan key:generate`, `php artisan migrate --seed`
+    - Run tests: `vendor/bin/pest`
+    - Run the demo: `ledger:charge-subscription`, `ledger:refund-subscription`, `ledger:run-payouts`
+    - Assumptions: platform cut 30%, monthly settlement, single currency, calendar-month plans, partial refunds
 - `docs/ARCHITECTURE.md`
-  - Domain model diagram (ASCII)
-  - Database design rationale (unified ledger, calendar-month plans, monthly cycle)
-  - Revenue allocation strategy (largest-remainder)
-  - Idempotency layers (3: `provider_charge_reference` unique, `idempotency_key` unique on ledger, `subscription_entry_id` unique for refunds)
-  - Provider timeout handling (3 outcomes, reconciliation worker with backoff)
-  - Refund flow (partial, by day-count)
-  - Service layer / thin jobs rationale
-  - Scaling notes (indexes, what would change at 500k subs)
-  - Known limitations (single currency, no mid-term upgrade, no engagement-based allocation)
+    - Domain model diagram (ASCII)
+    - Database design rationale (unified ledger, calendar-month plans, monthly cycle)
+    - Revenue allocation strategy (largest-remainder)
+    - Idempotency layers (3: `provider_charge_reference` unique, `idempotency_key` unique on ledger, `subscription_entry_id` unique for refunds)
+    - Provider timeout handling (3 outcomes, reconciliation worker with backoff)
+    - Refund flow (partial, by day-count)
+    - Service layer / thin jobs rationale
+    - Scaling notes (indexes, what would change at 500k subs)
+    - Known limitations (single currency, no mid-term upgrade, no engagement-based allocation)
 - `docs/AI_USAGE.md` (challenge requirement)
-  - How AI was used: trade-off discussions, edge-case brainstorming, test-vector suggestions, code review
-  - What AI generated vs. what was designed manually
-  - Engineering decisions made personally
-  - What differentiates this submission
-  - Trade-offs and improvements intentionally chosen
+    - How AI was used: trade-off discussions, edge-case brainstorming, test-vector suggestions, code review
+    - What AI generated vs. what was designed manually
+    - Engineering decisions made personally
+    - What differentiates this submission
+    - Trade-offs and improvements intentionally chosen
 - `docs/VIDEO_OUTLINE.md` — 15–20 min walkthrough outline (6 sections per the challenge brief: intro, architecture, failure scenarios, testing, AI usage, future improvements)

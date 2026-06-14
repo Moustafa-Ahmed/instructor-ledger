@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\SubscriptionStatus;
+use Carbon\CarbonImmutable;
 use Database\Factories\SubscriptionFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Support\Carbon;
 
 class Subscription extends Model
 {
@@ -45,8 +45,8 @@ class Subscription extends Model
 
     public function scopeForPeriod(Builder $query, int $year, int $month): Builder
     {
-        $start = Carbon::create($year, $month, 1)->startOfMonth();
-        $end = $start->copy()->addMonth();
+        $start = CarbonImmutable::create($year, $month, 1)->startOfMonth();
+        $end = $start->addMonth();
 
         return $query->where('started_at', '>=', $start)->where('started_at', '<', $end);
     }

@@ -25,7 +25,7 @@ class LedgerEntryFactory extends Factory
             'user_id' => User::factory(),
             'type' => LedgerEntryType::SubscriptionPayment,
             'amount_cents' => $this->faker->numberBetween(100, 100000),
-            'idempotency_key' => 'ledger:'.Str::random(20),
+            'idempotency_key' => 'ledger:' . Str::random(20),
             'subscription_entry_id' => null,
             'meta' => null,
         ];
@@ -33,36 +33,38 @@ class LedgerEntryFactory extends Factory
 
     public function subscriptionPayment(): static
     {
-        return $this->state(fn () => [
+        return $this->state(fn() => [
             'type' => LedgerEntryType::SubscriptionPayment,
             'subscription_id' => Subscription::factory(),
             'user_id' => User::factory(),
             'subscription_entry_id' => null,
-            'idempotency_key' => 'payment:'.Str::random(20),
+            'idempotency_key' => 'payment:' . Str::random(20),
         ]);
     }
 
     public function subscriptionRefundOf(LedgerEntry $source): static
     {
-        return $this->state(fn () => [
+        return $this->state(fn() => [
             'type' => LedgerEntryType::SubscriptionRefund,
             'amount_cents' => -$source->amount_cents,
             'subscription_id' => $source->subscription_id,
             'user_id' => $source->user_id,
             'subscription_entry_id' => $source->id,
-            'idempotency_key' => 'refund:'.Str::random(20),
+            'idempotency_key' => 'refund:' . Str::random(20),
         ]);
     }
 
     public function platformCut(int $year, int $month, int $amountCents): static
     {
-        return $this->state(fn () => [
+        $period = sprintf('%04d-%02d', $year, $month);
+
+        return $this->state(fn() => [
             'type' => LedgerEntryType::PlatformCut,
             'amount_cents' => -$amountCents,
             'subscription_id' => null,
             'user_id' => null,
             'subscription_entry_id' => null,
-            'idempotency_key' => "platform_cut:{$year}-{$month}",
+            'idempotency_key' => "platform_cut:{$period}",
         ]);
     }
 
@@ -70,6 +72,7 @@ class LedgerEntryFactory extends Factory
     {
         return $this->state(function () use ($year, $month, $amountCents, $instructor) {
             $userId = $instructor?->id ?? User::factory()->instructor()->create()->id;
+            $period = sprintf('%04d-%02d', $year, $month);
 
             return [
                 'type' => LedgerEntryType::InstructorPayout,
@@ -77,7 +80,7 @@ class LedgerEntryFactory extends Factory
                 'subscription_id' => null,
                 'user_id' => $userId,
                 'subscription_entry_id' => null,
-                'idempotency_key' => "payout:{$year}-{$month}:user:{$userId}",
+                'idempotency_key' => "payout:{$period}:user:{$userId}",
             ];
         });
     }
