@@ -3,9 +3,9 @@
 declare(strict_types=1);
 
 use App\Enums\LedgerEntryType;
+use App\Enums\RefundStatus;
 use App\Enums\SubscriptionStatus;
 use App\Exceptions\MockPaymentProviderFailedException;
-use App\Enums\RefundStatus;
 use App\Models\LedgerEntry;
 use App\Models\Plan;
 use App\Models\Refund;
@@ -16,11 +16,12 @@ use App\Services\Subscriptions\RefundSubscriptionService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tests\TestCase;
 
-uses(Tests\TestCase::class, RefreshDatabase::class);
+uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function () {
-    $this->app->instance(MockPaymentProvider::class, new MockPaymentProvider());
+    $this->app->instance(MockPaymentProvider::class, new MockPaymentProvider);
 });
 
 function refundService(): RefundSubscriptionService
@@ -62,8 +63,7 @@ it('refunds a partial amount when cancelled mid-month, with cancel_date stored o
     $cancelDate = CarbonImmutable::create(2026, 6, 16);
     $refund = refundService()->refund($subscription->id, $cancelDate);
 
-    // 30-day month, cancel on day 16. Student used 16 days, 14 remaining.
-    // refund = 3000 * 14 / 30 = 1400.
+    // 30-day month, cancel on day 16: 14 remaining days → 3000 * 14 / 30 = 1400.
     expect($refund->amount_cents)->toBe(1400)
         ->and($refund->status)->toBe(RefundStatus::Completed)
         ->and($refund->subscription_id)->toBe($subscription->id);
@@ -90,8 +90,7 @@ it('refunds the most when cancelled on the first day of the period', function ()
 
     $refund = refundService()->refund($subscription->id, CarbonImmutable::create(2026, 6, 1));
 
-    // 30-day month, cancel on day 1, used 1 day, 29 remaining.
-    // refund = 1000 * 29 / 30 = 966.
+    // 30-day month, cancel on day 1: 29 remaining days → 1000 * 29 / 30 = 966.
     expect($refund->amount_cents)->toBe(966);
 });
 

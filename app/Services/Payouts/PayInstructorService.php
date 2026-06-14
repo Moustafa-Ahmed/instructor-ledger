@@ -11,22 +11,10 @@ use App\Services\Payments\MockPaymentProvider;
 use App\Services\Payouts\DTO\PayResult;
 use Illuminate\Support\Facades\DB;
 
-/**
- * Sends one `instructor_payout` row's money to the provider.
- *
- * State machine on `meta.status`:
- *   pending ──pay()──► sent          (provider succeeded)
- *                 ├──► failed        (provider failed — permanent)
- *                 └──► reconciling   (provider timed out after a real
- *                                     success; the reconcile worker
- *                                     owns the resolution)
- *
- * Idempotency: a row already in `sent`, `failed`, or `reconciling`
- * is returned as-is without calling the provider. The provider row
- * commits inside its own transaction before any timeout exception
- * is thrown, so a retry with the same idempotency key finds the
- * prior `mock_payment_operations` row and returns the prior result.
- */
+// State machine on `meta.status`: pending → sent | failed | reconciling.
+// A row already in a terminal state is returned as-is; the provider row
+// commits inside its own transaction before any timeout exception is thrown,
+// so a retry with the same idempotency key finds the prior result.
 class PayInstructorService
 {
     public function __construct(private readonly MockPaymentProvider $provider) {}

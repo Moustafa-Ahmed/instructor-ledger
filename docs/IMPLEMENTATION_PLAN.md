@@ -41,6 +41,12 @@ Trade-offs made during design. Each is the chosen path; the rejected alternative
 
 - **Phase 6: split state machine ownership, not shared** (vs. _one service handles everything_). `PayInstructorService` owns `pending → {sent, failed, reconciling}`. `ReconcileInstructorPayoutService` owns `reconciling → {sent, failed}` plus the `reconciliation_exhausted` terminator. The two services' short-circuits on each other's states prevent clobbering.
 
+- **Phase 7: money math lives in a service, not in Filament columns** (vs. _inline `getStateUsing` with per-row SUM queries_). `App\Services\Payouts\InstructorBalanceService` owns the `earned / paid / outstanding` math, with a batched `balancesForMany()` for table rendering. `User::payoutBalance()` is a thin accessor that reads from the eager-loaded relation when available and falls back to the service when not. Filament columns are pure presentation. This matches the project's architecture preference for keeping business logic out of UI layers.
+
+- **Phase 7: `reconciling` and `failed` rows are in-flight, not paid** (vs. _only `sent` rows count as paid_). Both states represent money the platform owes but the provider hasn't confirmed. Adding them to `outstanding` on top of `earned − paid` keeps the column honest: a `failed` row doesn't quietly disappear from the instructor's balance.
+
+- **Phase 7: `UserRole::Admin` was added** (vs. _admin checks via a boolean column or config_). The enum was already type-safe for `Student` / `Instructor`; a third case keeps the role column a string-backed enum and the `EnsureUserIsAdmin` middleware a one-liner. The `AdminUserSeeder` and the Filament panel auth both depend on it.
+
 ---
 
 ## Business Decisions
@@ -244,7 +250,7 @@ SUM(amount_cents) for ledger entries of (type, month) over month N
 
 ## Phase 5 — Close monthly payout service + command + scheduler ✅ DONE
 
-Four design decisions were settled before this phase was built. Each is in the code AND in this doc; the rationale lives here.
+The implementation matches the plan as written. Four design decisions were settled before this phase was built. Each is in the code AND in this doc; the rationale lives here.
 
 > **1. No application-level row locks. Idempotency gate is the unique `idempotency_key` index.**
 > _Rejected:_ the original plan called for `lockForUpdate()` on subscription rows in the period + a `sharedLock` on the join. SQL locks on the same query are mutually exclusive, and the unique index already makes the race harmless — the loser catches a `QueryException` (SQLSTATE 23000) and re-fetches the winning row. Two layers (fast precheck + unique-violation catch), zero row locks. Same shape as `ChargeSubscriptionService`'s race recovery.
@@ -316,7 +322,7 @@ Switched from `Carbon::create()` (mutable) to `CarbonImmutable::create()` for co
 
 ## Phase 6 — Pay instructor + reconciliation services + jobs ✅ DONE
 
-The state machine on `meta.status` is the spine of this phase:
+The implementation matches the plan as written. The state machine on `meta.status` is the spine of this phase:
 
 ```
   pending ──pay()──► sent          (provider said "succeeded")
@@ -348,10 +354,10 @@ Two design decisions were settled before the code was written. Each is in the co
 
 - `pay(int $ledgerEntryId): PayResult`
 - `DB::transaction()`:
-    - Load + `lockForUpdate()` the `instructor_payout` ledger row, scoped to `type = instructor_payout` (any other row type throws `ModelNotFoundException`).
+    - Load + `lockForUpdate()` the `instructor_payout` ledger row via the `LedgerEntry::scopePayoutRow($id)` local scope (any other row type throws `ModelNotFoundException`).
     - Read `meta.status` from the row. If `sent` or `failed`, return the existing status (no provider call, no DB write) — idempotent re-run.
     - If `reconciling`, return `reconciling` (the reconcile worker owns that row).
-    - Otherwise (`pending`, or `meta` empty for legacy rows): call `MockPaymentProvider::sendMoney('send:' . $entry->idempotency_key, abs($amount_cents), $currency, [...])`. The provider's idempotency-key contract is the same outbox-pattern-lite as `chargeMoney()` / `refundMoney()` — the `mock_payment_operations` row survives a timeout, a retry finds it.
+    - Otherwise (`pending`, or `meta` empty for legacy rows): call `MockPaymentProvider::sendMoney($providerIdempotencyKey, abs($amount_cents), $currency, [...])` where `$providerIdempotencyKey = config('ledger.idempotency.send', 'send:') . $entry->idempotency_key`. The provider's idempotency-key contract is the same outbox-pattern-lite as `chargeMoney()` / `refundMoney()` — the `mock_payment_operations` row survives a timeout, a retry finds it. The `ledger.idempotency.send` config key defaults to `send:` so the documented shape from the plan is preserved.
     - **On `succeeded`:** `meta = [...prior keys, status: 'sent', provider_reference, sent_at]`. The `array_merge` preserves any prior keys (e.g. a future `attempt_count`).
     - **On `failed`:** `meta = [...prior, status: 'failed', error, failed_at]`. No retry — permanent failure.
     - **On `timeout`:** `meta = [...prior, status: 'reconciling', reconciling_at]`. Returns `PayResult(needsReconciliation: true)`; the job dispatches a `ReconcileInstructorPayoutJob`.
@@ -360,12 +366,13 @@ Two design decisions were settled before the code was written. Each is in the co
 
 - `reconcile(int $ledgerEntryId, int $attempts, int $maxAttempts): void`
 - `markExhausted(int $ledgerEntryId): void` — called by the job's `failed()` hook AND by `reconcile()` when attempts run out in-band
+- Both methods share a private `markExhaustedOnEntry(LedgerEntry $entry)` helper that respects the terminal-state short-circuit: if `meta.status` is already `sent` or `failed`, it's a no-op (a competing process settled it; don't clobber).
 - `DB::transaction()`:
-    - Load + `lockForUpdate()` the row, scoped to `type = instructor_payout`.
+    - Load + `lockForUpdate()` the row via the same `scopePayoutRow($id)` local scope.
     - If `meta.status` is `sent` or `failed`, return — no-op (a competing process settled it; don't clobber).
     - If `meta.status` is not `reconciling`, return — the reconcile worker only operates on `reconciling` rows.
     - If `$attempts >= $maxAttempts`, write `meta = {status: 'failed', error: 'Reconciliation exhausted...', reconciliation_exhausted: true, failed_at}` and return — the in-band exhaustion path.
-    - Otherwise: `MockPaymentProvider::statusByIdempotencyKey(TYPE_SEND, 'send:' . idempotency_key)`.
+    - Otherwise: `MockPaymentProvider::statusByIdempotencyKey(TYPE_SEND, $providerIdempotencyKey)` (same configurable prefix as `pay()`).
         - `ModelNotFoundException` (provider has no record yet) → throw `StillReconcilingException` → re-queue.
         - `STATUS_SUCCEEDED` → `meta = {status: 'sent', provider_reference, sent_at, reconciled_at}`.
         - `STATUS_FAILED` → `meta = {status: 'failed', error: 'Provider reported failed on reconciliation.', failed_at, reconciled_at}`. (Note: this is `failed` _without_ `reconciliation_exhausted` — the provider actually said no.)
@@ -490,17 +497,78 @@ Phase 8 will add an end-to-end test for each.
 
 ---
 
-## Phase 7 — Filament (read-only ops screen) ⬜ TODO
+## Phase 7 — Filament (read-only ops screen) ✅ DONE
 
-- `composer require filament/filament:"^3.2" -W`
-- `php artisan filament:install --panels`
-- `app/Filament/Resources/InstructorResource.php` (read-only)
-    - Table columns: `name`, `payout_destination`, **`earned_cents`** (SUM of `type=allocation` allocations, sign-aware), **`paid_cents`** (abs SUM of `type=instructor_payout`), **`outstanding_cents`** (`earned − paid`)
-    - Per-row query against the ledger, no materialization
-    - Negative outstanding → "balance owed back" badge
-- `app/Filament/Resources/PayoutHistoryRelationManager.php` (read-only)
-    - Per-instructor list of `instructor_payout` ledger rows with `meta.status`, `sent_at`, amount
-- Admin user seeder
+Implemented as the only UI surface in the project. A few decisions went beyond the original plan; each is in the code AND in this doc.
+
+> **1. The math is in a service, not in a Filament column.** The plan said "Per-row query against the ledger, no materialization." The code does this through `App\Services\Payouts\InstructorBalanceService` with a `balancesForMany(array $userIds)` batched entry point, and `User::payoutBalance()` as the per-row accessor (auto-delegates to the service when the relation is not eager-loaded). The Filament table eager-loads `payoutLedgerEntries` and the `getStateUsing` closure just reads from the relation. Result: one SQL query for the page's payout rows, no N+1, no business logic in the column.
+
+> **2. `outstanding_cents` treats `reconciling` and `failed` as in-flight, not paid.** A `reconciling` row is money we believe we'll owe but the provider hasn't confirmed; a `failed` row is money we owe because a previous attempt didn't land. Both add to outstanding on top of the `earned − paid` base. The class docblock on `InstructorBalanceService` documents the convention. The plan's "Negative outstanding → 'balance owed back' badge" maps onto this — `failed` rows produce positive outstanding (we owe them still) and reconciliation_exhausted rows would be a future improvement to surface as a distinct badge.
+
+> **3. The badge color logic is `state < 0 → warning, state > 0 → info, 0 → gray`.** In practice the column is rarely negative (an instructor only goes negative if they were over-paid in a previous month); the `info` color is the common "we owe them" state and `gray` means settled.
+
+> **4. `UserRole::Admin` was added.** The plan listed only `Student` / `Instructor` on the enum. The admin user seeder and the `EnsureUserIsAdmin` middleware need a third value; adding the case is the smallest change that keeps the role column type-safe.
+
+### `app/Filament/Resources/InstructorResource.php`
+
+- `protected static ?string $model = User::class` — model is `User`, scoped to `role = instructor` via `scopeToInstructors(Builder)` in the table query.
+- `protected static ?string $navigationGroup = 'Payouts'` and `navigationIcon = 'heroicon-o-academic-cap'`.
+- `form()` returns an empty form — the resource is read-only. `ViewAction` is the only row action; no bulk actions.
+- Table columns:
+    - `name` (searchable, sortable)
+    - `payout_destination` (label, placeholder `—`, searchable)
+    - `earned_cents` (label `Earned`, money USD, `getStateUsing` → `$record->payoutBalance()['earned_cents']`, sortable)
+    - `paid_cents` (label `Paid`, money USD, `getStateUsing` → `$record->payoutBalance()['paid_cents']`, sortable)
+    - `outstanding_cents` (label `Outstanding`, money USD, **badge** with the color logic above, `getStateUsing` → `$record->payoutBalance()['outstanding_cents']`, sortable)
+- `modifyQueryUsing` filters to instructors AND eager-loads `payoutLedgerEntries` with the columns the accessor reads — `id`, `user_id`, `amount_cents`, `meta`. No N+1.
+- `getPages()` returns `index` (`ListInstructors::route('/')`) and `view` (`ViewInstructor::route('/{record}')`).
+- `getRelations()` registers `PayoutHistoryRelationManager::class`.
+
+### `app/Filament/Resources/InstructorResource/Pages/`
+
+- [ListInstructors.php](app/Filament/Resources/InstructorResource/Pages/ListInstructors.php) — `ListRecords` subclass, `protected static string $resource = InstructorResource::class`. No overrides.
+- [ViewInstructor.php](app/Filament/Resources/InstructorResource/Pages/ViewInstructor.php) — `ViewRecord` subclass. No `getHeaderActions()` override; `ViewRecord` already renders the breadcrumb back to the list.
+
+### `app/Filament/Resources/InstructorResource/RelationManagers/PayoutHistoryRelationManager.php`
+
+- `protected static string $relationship = 'ledgerEntries'` — uses the existing `User::ledgerEntries()` relation, filtered to payout rows.
+- `modifyQueryUsing` filters to `type = instructor_payout`, ordered by `id` desc.
+- `recordTitleAttribute('id')` — the row's title in the relation manager is the ledger row id.
+- Columns:
+    - `id` (label `Row id`, sortable)
+    - `idempotency_key` (label `Idempotency key`, searchable, copyable)
+    - `amount_cents` (label `Amount`, money USD, sortable)
+    - `meta.status` (label `Status`, badge with `sent → success, failed → danger, reconciling → warning, pending → gray`, default `gray`, placeholder `pending`)
+    - `meta.sent_at` (label `Sent at`, `since()` for human-friendly formatting, placeholder `—`)
+    - `meta.failed_at` (label `Failed at`, `since()`, placeholder `—`)
+    - `meta.provider_reference` (label `Provider reference`, placeholder `—`, searchable, copyable)
+- No header actions, no row actions, no bulk actions — the manager is read-only.
+
+### `app/Services/Payouts/InstructorBalanceService.php`
+
+- `balanceFor(int $userId): array{earned_cents: int, paid_cents: int, outstanding_cents: int}` — single-user convenience; delegates to the batched method.
+- `balancesForMany(array $userIds): array<int, array{earned_cents: int, paid_cents: int, outstanding_cents: int}>` — one SQL query for the whole batch, PHP aggregation. Users with no payout rows get a zero entry so callers can do a plain array lookup.
+- PHP aggregation (not SQL JSON predicates) keeps the meta-status filter portable across MySQL / SQLite / Postgres without dialect-specific JSON syntax. The class docblock calls this out.
+- Aggregation: for each row, `earned += abs(amount_cents)`. If `meta.status === 'sent'`, add to `paid`. If `meta.status === 'reconciling' || 'failed'`, add to `in_flight`. Final: `outstanding = earned − paid + in_flight`.
+
+### `app/Models/User.php` — relation + accessor
+
+- `payoutLedgerEntries(): HasMany` — `hasMany(LedgerEntry::class)->where('type', 'instructor_payout')`. Separate from the existing `ledgerEntries()` so the Filament table's eager-load is type-narrow.
+- `payoutBalance(): array` — accessor that reads from the eager-loaded `payoutLedgerEntries` relation when available, and falls back to `InstructorBalanceService::balanceFor($this->id)` when the relation is not loaded. The fallback makes a missing eager-load "work" at the cost of a per-user query (the Filament table always eager-loads, so the fallback is for non-Filament callers).
+
+### `database/seeders/AdminUserSeeder.php`
+
+- `User::query()->updateOrCreate(['email' => config('app.admin.email')], [...])`.
+- Password is `config('app.admin.password')` if set; otherwise, in `local` / `testing` environments, falls back to the dev-only literal `'password'`. In other environments, a missing config value throws `RuntimeException` with a deployment-time message — a non-dev env that forgot to set `ADMIN_PASSWORD` fails loudly here rather than silently seeding a known-credential admin.
+- `role` is `UserRole::Admin` (the new enum case).
+
+### `app/Enums/UserRole.php`
+
+- `Student = 'student'` / `Instructor = 'instructor'` / `Admin = 'admin'` (the third case is the new addition).
+
+### `app/Http/Middleware/EnsureUserIsAdmin.php`
+
+- Gates the Filament panel to `role === Admin`. Already existed in the codebase (it gates the `auth.admin` middleware group) and is the route-level companion to the `UserRole::Admin` enum case.
 
 ---
 

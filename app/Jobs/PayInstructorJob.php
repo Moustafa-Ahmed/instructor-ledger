@@ -12,24 +12,15 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-/**
- * Thin orchestrator: load the row via the service, dispatch a
- * reconciliation worker if the provider timed out after a real
- * success. No DB or provider code in this class.
- *
- * Why `tries = 1`? A single pay attempt either succeeds (the row is
- * `sent` / `failed`) or times out (the row is `reconciling`). A retry
- * of `pay()` on a `sent` / `failed` / `reconciling` row is a no-op by
- * the service's terminal-state short-circuit. The job is `ShouldBeUnique`
- * so two workers can't both grab the same `ledgerEntryId` — the unique
- * lock is the cross-process gate that complements the row-level
- * `lockForUpdate()` inside the service.
- */
-class PayInstructorJob implements ShouldQueue, ShouldBeUnique
+// `tries = 1` because the service's terminal-state short-circuit makes a retry
+// a no-op. `ShouldBeUnique` is the cross-process gate that complements the
+// row-level `lockForUpdate()` inside the service.
+class PayInstructorJob implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 1;
+
     public int $uniqueFor = 600;
 
     public function __construct(public int $ledgerEntryId) {}

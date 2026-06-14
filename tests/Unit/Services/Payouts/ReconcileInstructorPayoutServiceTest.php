@@ -34,7 +34,7 @@ it('resolves a reconciling row to sent when the provider reports succeeded', fun
     MockPaymentOperation::query()->create([
         'provider_reference' => 'pre-existing-ref',
         'operation_type' => MockPaymentProvider::TYPE_SEND,
-        'idempotency_key' => 'send:' . $this->payout->idempotency_key,
+        'idempotency_key' => 'send:'.$this->payout->idempotency_key,
         'amount_cents' => 1000,
         'currency' => 'USD',
         'status' => MockPaymentProvider::STATUS_SUCCEEDED,
@@ -53,7 +53,7 @@ it('resolves a reconciling row to failed when the provider reports failed', func
     MockPaymentOperation::query()->create([
         'provider_reference' => 'failed-ref',
         'operation_type' => MockPaymentProvider::TYPE_SEND,
-        'idempotency_key' => 'send:' . $this->payout->idempotency_key,
+        'idempotency_key' => 'send:'.$this->payout->idempotency_key,
         'amount_cents' => 1000,
         'currency' => 'USD',
         'status' => MockPaymentProvider::STATUS_FAILED,

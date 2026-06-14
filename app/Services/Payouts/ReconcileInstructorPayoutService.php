@@ -10,30 +10,15 @@ use App\Services\Payments\MockPaymentProvider;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 
-/**
- * Resolves a payout row the provider timed out on, by checking the
- * real provider status for the operation.
- *
- * State machine on `meta.status`:
- *   reconciling ──reconcile()──► sent        (provider says succeeded)
- *                       ├──► failed      (provider says failed — terminal)
- *                       └──► (no transition)  (no provider record yet —
- *                                             throw StillReconcilingException;
- *                                             the job releases with backoff)
- *
- * The job passes `$attempts` so the service can mark the row exhausted
- * on the last attempt. `markExhausted()` is the out-of-band safety
- * net for unexpected exceptions on the final attempt.
- */
+// Resolves a payout row the provider timed out on. State machine:
+// reconciling → sent | failed | (no transition; throw StillReconcilingException
+// so the job releases with backoff). The normal exhaustion path is handled
+// in-band inside `reconcile()`; `markExhausted()` is the safety net called
+// from the job's `failed()` hook on the final attempt.
 class ReconcileInstructorPayoutService
 {
     public function __construct(private readonly MockPaymentProvider $provider) {}
 
-    /**
-     * Resolve a reconciling row. Throws StillReconcilingException
-     * when the provider has no final status yet, so the job
-     * releases with backoff.
-     */
     public function reconcile(int $ledgerEntryId, int $attempts, int $maxAttempts): void
     {
         DB::transaction(function () use ($ledgerEntryId, $attempts, $maxAttempts) {
@@ -97,12 +82,6 @@ class ReconcileInstructorPayoutService
         });
     }
 
-    /**
-     * Safety-net entry point called from the job's `failed()` hook
-     * when an unexpected exception escapes `reconcile()` on the
-     * final attempt. The normal exhaustion path is handled
-     * in-band inside `reconcile()`.
-     */
     public function markExhausted(int $ledgerEntryId): void
     {
         DB::transaction(function () use ($ledgerEntryId) {
@@ -124,7 +103,6 @@ class ReconcileInstructorPayoutService
     {
         $meta = $entry->meta ?? [];
 
-        // Don't clobber a row already in a terminal state.
         $current = (string) ($meta['status'] ?? 'pending');
         if ($current === 'sent' || $current === 'failed') {
             return;

@@ -1,0 +1,1 @@
+don't over comment the code keep comments relevant and concise. Use comments to explain why something is done, not what is done. Avoid stating the obvious, and focus on providing context or reasoning behind complex logic.

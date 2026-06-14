@@ -32,16 +32,23 @@ class UserFactory extends Factory
 
     public function unverified(): static
     {
-        return $this->state(fn (array $attributes) => [
+        return $this->state(fn(array $attributes) => [
             'email_verified_at' => null,
         ]);
     }
 
     public function instructor(): static
     {
-        return $this->state(fn () => [
+        return $this->state(fn() => [
             'role' => UserRole::Instructor,
-            'payout_destination' => 'acct_'.fake()->unique()->bothify('??##??##??##'),
+            'payout_destination' => 'acct_' . fake()->unique()->bothify('??##??##??##'),
+        ]);
+    }
+
+    public function admin(): static
+    {
+        return $this->state(fn() => [
+            'role' => UserRole::Admin,
         ]);
     }
 }

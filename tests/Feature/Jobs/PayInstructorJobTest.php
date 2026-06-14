@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-use App\Enums\LedgerEntryType;
 use App\Jobs\PayInstructorJob;
 use App\Jobs\ReconcileInstructorPayoutJob;
 use App\Models\LedgerEntry;
+use App\Models\User;
 use App\Services\Payments\MockPaymentProvider;
 use App\Services\Payouts\PayInstructorService;
 use Illuminate\Support\Facades\Bus;
@@ -16,7 +16,7 @@ beforeEach(function () {
     config()->set('ledger.currency', 'USD');
     config()->set('ledger.idempotency.send', 'send:');
 
-    $instructor = \App\Models\User::factory()->instructor()->create();
+    $instructor = User::factory()->instructor()->create();
     $this->payout = LedgerEntry::factory()->instructorPayout(2026, 6, 1000, $instructor)->create();
 });
 
@@ -75,7 +75,7 @@ it('marks the row reconciling AND dispatches a reconcile job on a timeout outcom
 
 it('is a no-op for a row that is already sent (idempotent re-run)', function () {
     $this->payout->update(['meta' => ['status' => 'sent', 'provider_reference' => 'old-ref', 'sent_at' => '2026-07-01T00:00:00Z']]);
-    $this->provider->useRandomOutcomes(); // would pick a random outcome if the service called it
+    $this->provider->useRandomOutcomes();
     Bus::fake([PayInstructorJob::class, ReconcileInstructorPayoutJob::class]);
 
     (new PayInstructorJob($this->payout->id))->handle(app(PayInstructorService::class));
@@ -108,9 +108,8 @@ it('does not double-dispatch a reconcile job for a row that is already reconcili
 
     $this->payout->refresh();
     expect($this->payout->meta['status'])->toBe('reconciling');
-    // The reconcile job that was already in flight when the row hit
-    // 'reconciling' owns the next step. A second dispatch from pay()
-    // would create a race for who marks the row sent first. The
-    // service's reconciling short-circuit prevents that.
+    // A second dispatch would race the already-in-flight reconcile job for who
+    // marks the row sent first. The service's reconciling short-circuit
+    // prevents that.
     Bus::assertNotDispatched(ReconcileInstructorPayoutJob::class);
 });

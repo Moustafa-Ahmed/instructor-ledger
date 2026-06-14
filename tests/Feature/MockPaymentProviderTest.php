@@ -1,7 +1,9 @@
 <?php
 
-use App\Exceptions\MockPaymentProviderTimeoutException;
+declare(strict_types=1);
+
 use App\Exceptions\MockPaymentProviderFailedException;
+use App\Exceptions\MockPaymentProviderTimeoutException;
 use App\Models\MockPaymentOperation;
 use App\Services\Payments\MockPaymentProvider;
 use Illuminate\Database\Eloquent\ModelNotFoundException;

@@ -2,17 +2,20 @@
 
 declare(strict_types=1);
 
+use App\Enums\LedgerEntryType;
+use App\Models\LedgerEntry;
 use App\Models\Plan;
 use App\Models\Refund;
 use App\Models\Subscription;
 use App\Models\User;
 use App\Services\Payments\MockPaymentProvider;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
 
 beforeEach(function () {
-    $this->app->instance(MockPaymentProvider::class, new MockPaymentProvider());
+    $this->app->instance(MockPaymentProvider::class, new MockPaymentProvider);
     app(MockPaymentProvider::class)
         ->useDeterministicOutcomes(MockPaymentProvider::OUTCOME_SUCCEEDED);
 });
@@ -25,16 +28,16 @@ it('refunds a subscription on a valid invocation', function () {
     $subscription = Subscription::factory()->create([
         'user_id' => $student->id,
         'plan_id' => $plan->id,
-        'started_at' => Carbon\CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
-        'ends_at' => Carbon\CarbonImmutable::create(2026, 6, 1)->startOfMonth()->addMonth(),
+        'started_at' => CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
+        'ends_at' => CarbonImmutable::create(2026, 6, 1)->startOfMonth()->addMonth(),
         'charged_amount_cents' => 1000,
         'currency' => 'USD',
-        'charged_at' => Carbon\CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
+        'charged_at' => CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
     ]);
-    App\Models\LedgerEntry::factory()->create([
+    LedgerEntry::factory()->create([
         'subscription_id' => $subscription->id,
         'user_id' => $student->id,
-        'type' => App\Enums\LedgerEntryType::SubscriptionPayment,
+        'type' => LedgerEntryType::SubscriptionPayment,
         'amount_cents' => 1000,
     ]);
 
@@ -53,11 +56,11 @@ it('rejects an invalid date format with exit code INVALID', function () {
     $subscription = Subscription::factory()->create([
         'user_id' => $student->id,
         'plan_id' => $plan->id,
-        'started_at' => Carbon\CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
-        'ends_at' => Carbon\CarbonImmutable::create(2026, 6, 1)->startOfMonth()->addMonth(),
+        'started_at' => CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
+        'ends_at' => CarbonImmutable::create(2026, 6, 1)->startOfMonth()->addMonth(),
         'charged_amount_cents' => 1000,
         'currency' => 'USD',
-        'charged_at' => Carbon\CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
+        'charged_at' => CarbonImmutable::create(2026, 6, 1)->startOfMonth(),
     ]);
 
     $this->artisan('ledger:refund-subscription', [

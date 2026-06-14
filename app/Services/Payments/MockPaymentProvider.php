@@ -1,11 +1,12 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Services\Payments;
 
 use App\Exceptions\MockPaymentProviderFailedException;
 use App\Exceptions\MockPaymentProviderTimeoutException;
 use App\Models\MockPaymentOperation;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -52,9 +53,7 @@ class MockPaymentProvider
         );
     }
 
-    /**
-     * Send money to an instructor.
-     */
+    /** Send money to an instructor. */
     public function sendMoney(string $idempotencyKey, int $amountCents, string $currency, array $metadata = []): array
     {
         return $this->createOrReturnOperation(
@@ -66,9 +65,7 @@ class MockPaymentProvider
         );
     }
 
-    /**
-     * Refund money to a student.
-     */
+    /** Refund money to a student. */
     public function refundMoney(string $idempotencyKey, int $amountCents, string $currency, array $metadata = []): array
     {
         return $this->createOrReturnOperation(
@@ -80,12 +77,9 @@ class MockPaymentProvider
         );
     }
 
-    /**
-     * Check the real provider status for an operation reference.
-     */
+    /** Check the real provider status for an operation reference. */
     public function status(string $providerReference): array
     {
-
         return $this->formatOperation(
             MockPaymentOperation::query()
                 ->where('provider_reference', $providerReference)
@@ -210,10 +204,8 @@ class MockPaymentProvider
         );
     }
 
-    /**
-     * Idempotency-path lookup: returns null when the record doesn't exist
-     * yet (e.g. on the first charge/send for a given key). Must NOT throw.
-     */
+    // Idempotency-path lookup: returns null when the record doesn't exist yet
+    // (e.g. on the first charge/send for a given key). Must NOT throw.
     private function findOperationOrNull(string $operationType, string $idempotencyKey): ?MockPaymentOperation
     {
         return MockPaymentOperation::query()
@@ -254,7 +246,6 @@ class MockPaymentProvider
 
         return $outcomes[random_int(0, count($outcomes) - 1)];
     }
-
 
     private function statusForOutcome(string $outcome): string
     {

@@ -14,7 +14,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Bus;
 
 beforeEach(function () {
-    $provider = new MockPaymentProvider();
+    $provider = new MockPaymentProvider;
     $this->app->instance(MockPaymentProvider::class, $provider);
 });
 
@@ -50,13 +50,10 @@ it('completes on the first attempt when the provider returns succeeded', functio
 });
 
 it('recovers on retry when the first attempt timed out and the provider already wrote a succeeded row', function () {
-    // Single-element array: every attempt would pick TIMEOUT if the
-    // provider had to choose an outcome. But the provider's
-    // createOrReturnOperation finds the prior row by idempotency_key
-    // before calling chooseOutcome, and returnOrThrowOperationResult
-    // returns the persisted succeeded result without re-throwing. The
-    // retry therefore succeeds by reading the prior outcome from the
-    // provider's store, not by being given a different outcome.
+    // The retry succeeds by reading the prior outcome from the provider's
+    // store, not by being given a different outcome — the provider's
+    // createOrReturnOperation finds the prior row by idempotency_key before
+    // calling chooseOutcome.
     app(MockPaymentProvider::class)
         ->useDeterministicOutcomes(MockPaymentProvider::OUTCOME_TIMEOUT_AFTER_SUCCESS);
     $student = User::factory()->create();

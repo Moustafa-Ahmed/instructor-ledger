@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Enums\LedgerEntryType;
 use App\Enums\UserRole;
+use App\Services\Payouts\InstructorBalanceService;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -12,17 +14,6 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
-/**
- * A platform account.
- *
- * role=student    — buys subscriptions, has ledger entries of type=allocation
- *                   (as the charged subscription, not the earning).
- * role=instructor — teaches courses (rows in course_instructor) and has
- *                   ledger entries of type=allocation and type=payout
- *                   against them.
- *
- * payout_destination is only meaningful when role=instructor.
- */
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
@@ -65,5 +56,47 @@ class User extends Authenticatable
     public function ledgerEntries(): HasMany
     {
         return $this->hasMany(LedgerEntry::class);
+    }
+
+    public function payoutLedgerEntries(): HasMany
+    {
+        return $this->hasMany(LedgerEntry::class)
+            ->where('type', LedgerEntryType::InstructorPayout->value);
+    }
+
+    /**
+     * @return array{earned_cents: int, paid_cents: int, outstanding_cents: int}
+     */
+    public function payoutBalance(): array
+    {
+        // The relation must be eager-loaded by the caller. The fallback makes
+        // a missing eager-load "work" at the cost of a per-user query.
+        if (! $this->relationLoaded('payoutLedgerEntries')) {
+            return app(InstructorBalanceService::class)
+                ->balanceFor((int) $this->id);
+        }
+
+        $earned = 0;
+        $paid = 0;
+        $inFlight = 0;
+
+        foreach ($this->payoutLedgerEntries as $row) {
+            $abs = (int) abs($row->amount_cents);
+            $earned += $abs;
+
+            $status = (string) (($row->meta ?? [])['status'] ?? 'pending');
+
+            if ($status === 'sent') {
+                $paid += $abs;
+            } elseif ($status === 'reconciling' || $status === 'failed') {
+                $inFlight += $abs;
+            }
+        }
+
+        return [
+            'earned_cents' => $earned,
+            'paid_cents' => $paid,
+            'outstanding_cents' => $earned - $paid + $inFlight,
+        ];
     }
 }

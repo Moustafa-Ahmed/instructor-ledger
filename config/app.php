@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 return [
 
     /*
@@ -14,6 +16,21 @@ return [
     */
 
     'name' => env('APP_NAME', 'Laravel'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Admin Panel Credentials
+    |--------------------------------------------------------------------------
+    |
+    | Credentials for the seeded admin user who can sign in to the
+    | Filament read-only ops panel at `/admin`.
+    |
+    */
+
+    'admin' => [
+        'email' => env('ADMIN_EMAIL', 'admin@example.test'),
+        'password' => env('ADMIN_PASSWORD'),
+    ],
 
     /*
     |--------------------------------------------------------------------------

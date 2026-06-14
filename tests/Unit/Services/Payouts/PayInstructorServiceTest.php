@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
-use App\Enums\LedgerEntryType;
 use App\Models\LedgerEntry;
+use App\Models\MockPaymentOperation;
+use App\Models\User;
 use App\Services\Payments\MockPaymentProvider;
 use App\Services\Payouts\PayInstructorService;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -17,7 +19,7 @@ beforeEach(function () {
     config()->set('ledger.currency', 'USD');
     config()->set('ledger.idempotency.send', 'send:');
 
-    $this->instructor = \App\Models\User::factory()->instructor()->create();
+    $this->instructor = User::factory()->instructor()->create();
     $this->payout = LedgerEntry::factory()->instructorPayout(2026, 6, 1000, $this->instructor)->create();
 });
 
@@ -70,9 +72,9 @@ it('marks the row reconciling on a timeout_after_success outcome and signals rec
 it('is a no-op when the row is already sent (idempotent re-run, no provider call)', function () {
     $this->payout->update(['meta' => ['status' => 'sent', 'provider_reference' => 'old-ref', 'sent_at' => '2026-07-01T00:00:00Z']]);
 
-    // The provider is NOT set to deterministic. If the service calls it,
-    // a non-deterministic outcome would be chosen — but the test
-    // asserts that the row is untouched and the provider isn't called.
+    // Provider is left non-deterministic: if the service called it, a random
+    // outcome would be chosen. The test asserts the row is untouched and the
+    // provider isn't called.
     $result = payService()->pay($this->payout->id);
 
     expect($result->status)->toBe('sent')
@@ -114,10 +116,9 @@ it('sends a positive amount to the provider (the ledger row is negative)', funct
 
     payService()->pay($this->payout->id);
 
-    // Verify the provider saw a positive amount — the ledger row's
-    // amount_cents is -1000 (a payout), the provider's sendMoney
-    // requires a positive amount.
-    $operation = \App\Models\MockPaymentOperation::query()
+    // The ledger row is -1000 (a payout); the provider's sendMoney requires
+    // a positive amount.
+    $operation = MockPaymentOperation::query()
         ->where('operation_type', MockPaymentProvider::TYPE_SEND)
         ->where('idempotency_key', 'send:' . $this->payout->idempotency_key)
         ->first();
@@ -132,7 +133,7 @@ it('uses the documented idempotency_key pattern "send:" + ledger idempotency_key
     payService()->pay($this->payout->id);
 
     $expectedKey = 'send:' . $this->payout->idempotency_key;
-    expect(\App\Models\MockPaymentOperation::query()
+    expect(MockPaymentOperation::query()
         ->where('operation_type', MockPaymentProvider::TYPE_SEND)
         ->where('idempotency_key', $expectedKey)
         ->exists())->toBeTrue();
@@ -140,16 +141,15 @@ it('uses the documented idempotency_key pattern "send:" + ledger idempotency_key
 
 it('throws when the row does not exist', function () {
     payService()->pay(999999);
-})->throws(Illuminate\Database\Eloquent\ModelNotFoundException::class);
+})->throws(ModelNotFoundException::class);
 
 it('throws when the row is not an instructor_payout', function () {
     $platformCut = LedgerEntry::factory()->platformCut(2026, 6, 1000)->create();
     payService()->pay($platformCut->id);
-})->throws(Illuminate\Database\Eloquent\ModelNotFoundException::class);
+})->throws(ModelNotFoundException::class);
 
 it('preserves prior meta keys when transitioning status', function () {
-    // Older rows or future features may write other meta keys; the
-    // state transition should merge, not clobber.
+    // The state transition should merge, not clobber.
     $this->payout->update(['meta' => ['status' => 'pending', 'attempt_count' => 0, 'origin' => 'phase5']]);
 
     $this->provider->useDeterministicOutcomes(MockPaymentProvider::OUTCOME_SUCCEEDED);

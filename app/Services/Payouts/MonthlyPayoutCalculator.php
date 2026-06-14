@@ -43,12 +43,12 @@ class MonthlyPayoutCalculator
                 LedgerEntryType::SubscriptionPayment->value,
                 LedgerEntryType::SubscriptionRefund->value,
             ])
-            ->whereHas('subscription', fn ($q) => $q->forPeriod($year, $month))
+            ->whereHas('subscription', fn($q) => $q->forPeriod($year, $month))
             ->sum('amount_cents');
     }
 
     /**
-     * @return array<int, int>  user_id => summed revenue_weight
+     * @return array<int, int> user_id => summed revenue_weight
      */
     private function loadInstructorWeights(): array
     {
@@ -66,12 +66,11 @@ class MonthlyPayoutCalculator
     }
 
     /**
-     * Sort user_ids directly (not array values) so the tie-break by
-     * user_id is unambiguous. PHP's uasort loses key context in its
-     * comparator and is not stable.
+     * Sort user_ids directly so the tie-break by user_id is unambiguous
+     * (PHP's uasort loses key context in its comparator and is not stable).
      *
      * @param  array<int, int>  $weights  user_id => weight
-     * @return array<int, int>  user_id => cents (positive, sum = $pool)
+     * @return array<int, int> user_id => cents (positive, sum = $pool)
      */
     private function allocateLargestRemainder(int $pool, array $weights): array
     {

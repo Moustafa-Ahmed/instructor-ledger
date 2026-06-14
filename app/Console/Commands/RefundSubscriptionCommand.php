@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Exceptions\MockPaymentProviderFailedException;
+use App\Exceptions\MockPaymentProviderTimeoutException;
 use App\Models\Subscription;
 use App\Services\Subscriptions\RefundSubscriptionService;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Throwable;
 
 class RefundSubscriptionCommand extends Command
@@ -41,15 +44,15 @@ class RefundSubscriptionCommand extends Command
             $this->error($e->getMessage());
 
             return self::FAILURE;
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException) {
+        } catch (ModelNotFoundException) {
             $this->error("Subscription #{$subscriptionId} not found.");
 
             return self::FAILURE;
-        } catch (\App\Exceptions\MockPaymentProviderFailedException) {
+        } catch (MockPaymentProviderFailedException) {
             $this->error('Provider declined the refund.');
 
             return self::FAILURE;
-        } catch (\App\Exceptions\MockPaymentProviderTimeoutException) {
+        } catch (MockPaymentProviderTimeoutException) {
             $this->error('Provider timed out. No refund recorded. Retry later.');
 
             return 75;
